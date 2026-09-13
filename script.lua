@@ -1,5 +1,4 @@
--- ═══════════════════════════════════════════════════════════════
-
+-- BSS AUTO FARM v5.1 - DELTA OPTIMIZED
 print("[BSS AutoFarm] Script iniciado!")
 pcall(function()
 	game.StarterGui:SetCore("SendNotification", {
