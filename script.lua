@@ -222,6 +222,7 @@ CONFIG = {
 	IntelligentFarm = true, -- Vai para flores melhores
 	-- Mantém o percurso previsível de 9 pontos (grade 3x3) como padrão.
 	FarmMode = "Route Sweep",
+	GridSize = 3,
 	
 	-- Coconut Catcher
 	CoconutCatcher = false,
@@ -1239,10 +1240,15 @@ local function buildFieldRoute(center, size)
 	local halfX = math.max(2, math.min(CONFIG.FieldRadius, (size.X * 0.5) - 4))
 	local halfZ = math.max(2, math.min(CONFIG.FieldRadius, (size.Z * 0.5) - 4))
 	local route = {}
+	local gridSize = math.clamp(math.floor(CONFIG.GridSize or 3), 3, 10)
 
-	for row = -1, 1 do
-		for column = -1, 1 do
-			table.insert(route, center + Vector3.new(halfX * column, 0, halfZ * row))
+	for row = 0, gridSize - 1 do
+		local z = gridSize == 1 and 0 or -halfZ + ((halfZ * 2) * row / (gridSize - 1))
+		-- Alternar o sentido das linhas evita que o personagem atravesse o campo inteiro.
+		for step = 0, gridSize - 1 do
+			local column = row % 2 == 0 and step or (gridSize - 1 - step)
+			local x = gridSize == 1 and 0 or -halfX + ((halfX * 2) * column / (gridSize - 1))
+			table.insert(route, center + Vector3.new(x, 0, z))
 		end
 	end
 
@@ -1637,6 +1643,18 @@ FarmTab:CreateDropdown({
 FarmTab:CreateParagraph({
 	Title = "Farm modes",
 	Content = "Smart Flowers follows the original flower and pollen-cluster selection. Route Sweep follows a stable grid inside the selected field."
+})
+
+FarmTab:CreateSlider({
+	Name = "Route Grid Size",
+	Range = {3, 10},
+	Increment = 1,
+	Suffix = " x grid",
+	CurrentValue = CONFIG.GridSize,
+	Flag = "RouteGridSize",
+	Callback = function(Value)
+		CONFIG.GridSize = Value
+	end,
 })
 
 -- Auto Collect Toggle
