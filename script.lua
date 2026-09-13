@@ -285,7 +285,7 @@ local hivePlatforms = workspace:WaitForChild("HivePlatforms", 30)
 
 if not flowerZones or not hivePlatforms then
 	warn("[BSS AutoFarm] FlowerZones ou HivePlatforms não encontrados. Certifique-se de executar no BSS.")
-	return
+	-- Continua mesmo assim para carregar a UI
 end
 
 -- ═══════════════════════════════════════════════════════════════
