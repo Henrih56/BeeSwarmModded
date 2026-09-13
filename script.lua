@@ -50,6 +50,12 @@ local RayfieldOk, Rayfield = pcall(function()
 	return loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 end)
 
+game.StarterGui:SetCore("SendNotification", {
+	Title = "BSS AutoFarm";
+	Text = "Carregando Rayfield...";
+	Duration = 3;
+})
+
 if not RayfieldOk or not Rayfield then
 	-- Fallback: cria stub para evitar crashes
 	local function stub() end
@@ -62,6 +68,11 @@ if not RayfieldOk or not Rayfield then
 		end
 	})
 	warn("[BSS AutoFarm] Falha ao carregar Rayfield. UI não disponível.")
+	game.StarterGui:SetCore("SendNotification", {
+		Title = "BSS AutoFarm - ERRO";
+		Text = "Rayfield falhou. UI indisponível.";
+		Duration = 10;
+	})
 end
 
 -- Helper function para notificações seguras
