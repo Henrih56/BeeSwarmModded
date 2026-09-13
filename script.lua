@@ -53,6 +53,20 @@ end
 -- Carrega Rayfield
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
+-- Helper function para notificações seguras
+local function safeNotify(title, content, duration)
+	pcall(function()
+		if Rayfield and Rayfield.Notify then
+			Rayfield:Notify({
+				Title = title,
+				Content = content,
+				Duration = duration or 3,
+				Image = 4483362458,
+			})
+		end
+	end)
+end
+
 -- Services
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
@@ -98,13 +112,17 @@ local function setupBalloonInflateListener()
 				if not CONFIG.Enabled or not BALLOON_FARM.Enabled then return end
 				-- Reseta o LastCheck para forçar verificação imediata
 				BALLOON_FARM.LastCheck = 0
-				-- Notifica
-				Rayfield:Notify({
-					Title = "🎈 Balloon Inflated!",
-					Content = "New balloon detected - going to farm!",
-					Duration = 3,
-					Image = 4483362458,
-				})
+				-- Notifica (com proteção caso Rayfield não esteja pronto)
+				pcall(function()
+					if Rayfield and Rayfield.Notify then
+						Rayfield:Notify({
+							Title = "🎈 Balloon Inflated!",
+							Content = "New balloon detected - going to farm!",
+							Duration = 3,
+							Image = 4483362458,
+						})
+					end
+				end)
 			end)
 		end
 	end)
@@ -753,14 +771,18 @@ local function farmBalloon(balloonData)
 	
 	RUNTIME.Stats.BalloonsVisited = RUNTIME.Stats.BalloonsVisited + 1
 	
-	Rayfield:Notify({
-		Title = "🎈 Balloon Found!",
-		Content = string.format("Farming %s balloon at %s", 
-			balloonData.MotionKind == "FieldBalloon" and "active" or "moving",
-			balloonData.Zone),
-		Duration = 3,
-		Image = 4483362458,
-	})
+	pcall(function()
+		if Rayfield and Rayfield.Notify then
+			Rayfield:Notify({
+				Title = "🎈 Balloon Found!",
+				Content = string.format("Farming %s balloon at %s", 
+					balloonData.MotionKind == "FieldBalloon" and "active" or "moving",
+					balloonData.Zone),
+				Duration = 3,
+				Image = 4483362458,
+			})
+		end
+	end)
 	
 	-- Farma ao redor do balão seguindo seu movimento
 	local farmStartTime = tick()
@@ -856,7 +878,11 @@ local function startBalloonFarm()
 end
 
 -- Setup do listener de balloon inflate (após todas as variáveis estarem declaradas)
-setupBalloonInflateListener()
+-- IMPORTANTE: Só chama após Rayfield estar carregado
+task.defer(function()
+	task.wait(2) -- aguarda Rayfield carregar completamente
+	setupBalloonInflateListener()
+end)
 
 -- ═══════════════════════════════════════════════════════════════
 --                     CLOUD FARM
@@ -2265,7 +2291,9 @@ InfoTab:CreateButton({
 
 Rayfield:LoadConfiguration()
 
+print("═══════════════════════════════════════════════════════════")
 print("[BSS AutoFarm] v4.1 Loaded — Balloons ALWAYS active! 🐝🎈")
 print("[BSS AutoFarm] Balloon detection: Workspace.Balloons.FieldBalloons + BalloonInflate event")
 print("[BSS AutoFarm] Balloons have priority over field farm (more pollen/second)")
 print("[BSS AutoFarm] Check Advanced tab for fine-tuning.")
+print("═══════════════════════════════════════════════════════════")
