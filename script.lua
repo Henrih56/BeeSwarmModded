@@ -1,6 +1,13 @@
 -- ═══════════════════════════════════════════════════════════════
 
 print("[BSS AutoFarm] Script iniciado!")
+pcall(function()
+	game.StarterGui:SetCore("SendNotification", {
+		Title = "BSS AutoFarm";
+		Text = "Script carregado!";
+		Duration = 5;
+	})
+end)
 
 -- Remove versões antigas
 local guiNames = {"AtlasV3", "AtlasStyleMacro", "BSSAutoFarm", "BSS Auto Farm", "AtlasV2", "BSSMacro"}
