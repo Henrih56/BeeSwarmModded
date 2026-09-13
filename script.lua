@@ -212,17 +212,8 @@ end
 local function fireToolCollect()
 	if COLLECT_INPUT.Held then return true end
 
-	-- PRIORIDADE 1: Delta's mouse1click (mais rápido e confiável)
-	if DELTA_FUNCTIONS.HasMouseClick then
-		local ok = pcall(mouse1click)
-		if ok then
-			COLLECT_INPUT.Held = true
-			COLLECT_INPUT.Method = "delta_click"
-			return true
-		end
-	end
-
-	-- PRIORIDADE 2: Delta's mouse1press/release (mantém pressionado)
+	-- Prioriza o botão mantido: funciona em executores que exigem pressão
+	-- contínua para a ferramenta coletora, incluindo Xeno e Delta.
 	local mousePosition = UserInputService:GetMouseLocation()
 	if hasInteractiveUiAt(mousePosition.X, mousePosition.Y) then return false end
 
@@ -233,6 +224,12 @@ local function fireToolCollect()
 			COLLECT_INPUT.Method = "delta_native"
 			return true
 		end
+	end
+
+	-- Fallback para executores que só expõem um clique simples. Não marca o
+	-- estado como "held", para que o clique seja repetido no próximo cooldown.
+	if DELTA_FUNCTIONS.HasMouseClick then
+		return pcall(mouse1click)
 	end
 
 	-- FALLBACK: VirtualInputManager (menos eficiente)
@@ -3224,16 +3221,15 @@ InfoTab:CreateButton({
 	end,
 })
 
-Rayfield:LoadConfiguration()
+-- Não restauramos configuração automaticamente: alguns executores reaplicam
+-- o valor salvo de AutoFarmToggle após o clique e desligam o farm na sequência.
 
 print("═══════════════════════════════════════════════════════════")
-print("[BSS AutoFarm] v5.1 DELTA OPTIMIZED 🐝⚡")
-print("[BSS AutoFarm] Executor: DELTA (Native Functions)")
-print("[BSS AutoFarm] ToolCollect: Delta's mouse1click (FASTER)")
-print("[BSS AutoFarm] Movement: Delta-optimized CFrame teleport")
+print("[BSS AutoFarm] v5.1 MULTI-EXECUTOR 🐝⚡")
+print("[BSS AutoFarm] ToolCollect: mouse1press/release com fallbacks")
+print("[BSS AutoFarm] Movement: CFrame teleport")
 print("[BSS AutoFarm] Balloon detection: Workspace.Balloons.FieldBalloons")
-print("[BSS AutoFarm] Performance: ENHANCED for Delta engine")
-print("[BSS AutoFarm] Detection risk: LOWER with Delta hooks")
+print("[BSS AutoFarm] Compatibility: Delta, Xeno e fallbacks padrão")
 print("═══════════════════════════════════════════════════════════")
 print("")
 print("Delta Features Detected:")
