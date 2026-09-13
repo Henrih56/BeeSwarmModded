@@ -1,10 +1,12 @@
 -- BSS AutoFarm Loader v5.1
-game.StarterGui:SetCore("SendNotification",{Title="BSS AutoFarm";Text="Carregando script completo...";Duration=3})
+game.StarterGui:SetCore("SendNotification",{Title="BSS AutoFarm";Text="Carregando (parte 1/2)...";Duration=2})
 
 local base="https://raw.githubusercontent.com/Henrih56/BeeSwarmModded/main/"
 local success,err=pcall(function()
-	local script=game:HttpGet(base.."script_ultra_min.lua")
-	loadstring(script)()
+	local part1=game:HttpGet(base.."part1.lua")
+	local part2=game:HttpGet(base.."part2.lua")
+	game.StarterGui:SetCore("SendNotification",{Title="BSS AutoFarm";Text="Executando script...";Duration=2})
+	loadstring(part1..part2)()
 end)
 
 if not success then
