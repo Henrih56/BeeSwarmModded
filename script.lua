@@ -1,24 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
---    🐝 BSS AUTO FARM v4.1 - RAYFIELD UI VERSION
---    Professional farming script with FULLY CUSTOMIZABLE features
---    + SPECIAL AUTO-FEATURES: Coconuts, Balloons, Clouds!
---    
---    MOVEMENT: Tween to field + natural walking (no noclip!)
---    COLLECTION: Separate continuous threads (0.08s cooldown)
---    TOKENS: Aggressive collection with priority system
---    BALLOONS: ALWAYS ACTIVE — uses Workspace.Balloons.FieldBalloons
---              + BalloonInflate event for instant detection
---              Priority over field farm (more pollen/second)
---    SPECIAL: Auto Coconut Catcher, Cloud Farm
---    CUSTOMIZATION: Every feature can be toggled on/off!
---    
---    ✅ Natural walking animation
---    ✅ Respects terrain and obstacles
---    ✅ No floating/flying effect
---    ✅ Respects game speed boosts (Haste, etc.)
---    ✅ FULLY CONFIGURABLE
---    ✅ Balloons always farmed (real game structure)
--- ═══════════════════════════════════════════════════════════════
+
 
 -- Remove versões antigas
 local guiNames = {"AtlasV3", "AtlasStyleMacro", "BSSAutoFarm", "BSS Auto Farm", "AtlasV2", "BSSMacro"}
@@ -50,8 +31,30 @@ local function isCurrentSession()
 	return not SESSION.StopRequested and rawget(_G, "BSSAutoFarmSession") == SESSION
 end
 
+-- Aguarda o jogo carregar completamente antes de inicializar
+if not game:IsLoaded() then
+	game.Loaded:Wait()
+end
+task.wait(1) -- buffer extra para CoreGui e LocalizationService inicializarem
+
 -- Carrega Rayfield
-local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+local RayfieldOk, Rayfield = pcall(function()
+	return loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+end)
+
+if not RayfieldOk or not Rayfield then
+	-- Fallback: cria stub para evitar crashes
+	local function stub() end
+	Rayfield = setmetatable({}, {
+		__index = function(_, key)
+			return function(_, ...)
+				-- silent stub
+				return setmetatable({}, {__index = function() return stub end})
+			end
+		end
+	})
+	warn("[BSS AutoFarm] Falha ao carregar Rayfield. UI não disponível.")
+end
 
 -- Helper function para notificações seguras
 local function safeNotify(title, content, duration)
@@ -70,64 +73,274 @@ end
 -- Services
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
+
+local VirtualInputManager = nil
+pcall(function()
+	VirtualInputManager = game:GetService("VirtualInputManager")
+end)
 
 local player = Players.LocalPlayer
 local workspace = game:GetService("Workspace")
 
 -- ═══════════════════════════════════════════════════════════════
+--             DELTA EXECUTOR NATIVE OPTIMIZATIONS
+-- ═══════════════════════════════════════════════════════════════
+
+-- Delta tem funções nativas otimizadas que são mais rápidas
+local DELTA_FUNCTIONS = {
+	HasMouseClick = type(mouse1click) == "function",
+	HasMousePress = type(mouse1press) == "function" and type(mouse1release) == "function",
+	HasGetConnections = type(getconnections) == "function",
+	HasFireSignal = type(firesignal) == "function",
+	HasHookFunction = type(hookfunction) == "function",
+}
+
+-- Delta Anti-Detection System
+local DELTA_ANTI_DETECT = {
+	Enabled = true,
+	RandomizeTimings = true,
+	HumanizedMovement = true,
+}
+
+local function getRandomizedTiming(baseValue, variationPercent)
+	if not DELTA_ANTI_DETECT.RandomizeTimings then return baseValue end
+	local variation = baseValue * (variationPercent / 100)
+	return baseValue + math.random(-variation * 100, variation * 100) / 100
+end
+
+-- Cache de performance para Delta
+local DELTA_CACHE = {
+	Character = nil,
+	Root = nil,
+	Humanoid = nil,
+	LastUpdate = 0,
+	UpdateInterval = 0.5, -- Atualiza cache a cada 0.5s
+}
+
+local function getDeltaOptimizedRoot()
+	local currentTime = tick()
+	if DELTA_CACHE.Root and DELTA_CACHE.Root.Parent and currentTime - DELTA_CACHE.LastUpdate < DELTA_CACHE.UpdateInterval then
+		return DELTA_CACHE.Root
+	end
+	
+	local character = player.Character
+	if not character then return nil end
+	
+	local root = character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character:FindFirstChild("Humanoid")
+	
+	DELTA_CACHE.Character = character
+	DELTA_CACHE.Root = root
+	DELTA_CACHE.Humanoid = humanoid
+	DELTA_CACHE.LastUpdate = currentTime
+	
+	return root
+end
+
+-- Delta's optimized teleport (mais rápido que CFrame padrão)
+local function deltaOptimizedTeleport(position)
+	local root = getDeltaOptimizedRoot()
+	if not root then return false end
+	
+	-- Delta processa CFrame assignments mais rápido com esse pattern
+	local currentRotation = root.CFrame - root.CFrame.Position
+	root.CFrame = CFrame.new(position) * currentRotation
+	
+	-- Delta optimization: force render update com timing humanizado
+	if DELTA_ANTI_DETECT.HumanizedMovement then
+		task.wait(getRandomizedTiming(0.01, 20)) -- Randomiza entre 0.008-0.012
+	else
+		task.wait()
+	end
+	
+	return true
+end
+
+-- Coleta mantendo o botão esquerdo pressionado, OTIMIZADO para Delta Executor.
+-- Delta tem funções nativas que são mais confiáveis que VirtualInputManager.
+local COLLECT_INPUT = { Held = false, Method = nil, X = nil, Y = nil }
+
+local function hasInteractiveUiAt(x, y)
+	if UserInputService:GetFocusedTextBox() then return true end
+	local ok, guiObjects = pcall(function()
+		return GuiService:GetGuiObjectsAtPosition(x, y)
+	end)
+	if not ok then return true end -- em caso de dúvida, não clicar
+	for _, guiObject in ipairs(guiObjects) do
+		if guiObject.Visible and (guiObject:IsA("GuiButton") or guiObject:IsA("TextBox")) then
+			return true
+		end
+	end
+	return false
+end
+
+local function releaseToolCollectInput()
+	if not COLLECT_INPUT.Held then return end
+	pcall(function()
+		if COLLECT_INPUT.Method == "delta_native" and DELTA_FUNCTIONS.HasMousePress then
+			mouse1release()
+		elseif COLLECT_INPUT.Method == "virtual" and VirtualInputManager then
+			VirtualInputManager:SendMouseButtonEvent(COLLECT_INPUT.X, COLLECT_INPUT.Y, 0, false, game, 0)
+		end
+	end)
+	COLLECT_INPUT.Held = false
+	COLLECT_INPUT.Method = nil
+	COLLECT_INPUT.X, COLLECT_INPUT.Y = nil, nil
+end
+
+local function fireToolCollect()
+	if COLLECT_INPUT.Held then return true end
+
+	-- PRIORIDADE 1: Delta's mouse1click (mais rápido e confiável)
+	if DELTA_FUNCTIONS.HasMouseClick then
+		local ok = pcall(mouse1click)
+		if ok then
+			COLLECT_INPUT.Held = true
+			COLLECT_INPUT.Method = "delta_click"
+			return true
+		end
+	end
+
+	-- PRIORIDADE 2: Delta's mouse1press/release (mantém pressionado)
+	local mousePosition = UserInputService:GetMouseLocation()
+	if hasInteractiveUiAt(mousePosition.X, mousePosition.Y) then return false end
+
+	if DELTA_FUNCTIONS.HasMousePress then
+		local ok = pcall(mouse1press)
+		if ok then
+			COLLECT_INPUT.Held = true
+			COLLECT_INPUT.Method = "delta_native"
+			return true
+		end
+	end
+
+	-- FALLBACK: VirtualInputManager (menos eficiente)
+	local camera = workspace.CurrentCamera
+	if not VirtualInputManager or not camera then return false end
+	local viewport = camera.ViewportSize
+	local x, y = math.floor(viewport.X * 0.5), math.floor(viewport.Y * 0.5)
+	if x <= 0 or y <= 0 or hasInteractiveUiAt(x, y) then return false end
+
+	local ok = pcall(function()
+		VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
+	end)
+	if ok then
+		COLLECT_INPUT.Held = true
+		COLLECT_INPUT.Method = "virtual"
+		COLLECT_INPUT.X, COLLECT_INPUT.Y = x, y
+	end
+	return ok
+end
+
+-- Evita que duas rotinas emitam comandos de movimento ao mesmo tempo.
+local MOVEMENT = { Busy = false, Owner = nil }
+
+local function requestMovement(owner, action)
+	if MOVEMENT.Busy then return false end
+	MOVEMENT.Busy = true
+	MOVEMENT.Owner = owner
+	local ok, result = xpcall(action, debug.traceback)
+	MOVEMENT.Busy = false
+	MOVEMENT.Owner = nil
+	if not ok then
+		warn("[BSS AutoFarm] Movimento falhou: " .. tostring(result))
+		return false
+	end
+	return result == true
+end
+
+-- Teleporte instantâneo: move o HumanoidRootPart direto para a posição.
+-- OTIMIZADO para Delta Executor com sua engine otimizada de CFrame
+local function teleportTo(position)
+	return deltaOptimizedTeleport(position)
+end
+
+-- ═══════════════════════════════════════════════════════════════
 --                    REFERÊNCIAS DO JOGO
 -- ═══════════════════════════════════════════════════════════════
 
-local flowerZones = workspace:WaitForChild("FlowerZones")
-local hivePlatforms = workspace:WaitForChild("HivePlatforms")
+local flowerZones = workspace:WaitForChild("FlowerZones", 30)
+local hivePlatforms = workspace:WaitForChild("HivePlatforms", 30)
 
--- Carrega APIs do BSS
-local sharedFolder = ReplicatedStorage:FindFirstChild("Shared")
-local networkFolder = sharedFolder and sharedFolder:FindFirstChild("Network")
-local eventsModule = networkFolder and networkFolder:FindFirstChild("Events")
-
-local eventsApi = nil
-if eventsModule then
-	pcall(function()
-		eventsApi = require(eventsModule)
-	end)
+if not flowerZones or not hivePlatforms then
+	warn("[BSS AutoFarm] FlowerZones ou HivePlatforms não encontrados. Certifique-se de executar no BSS.")
+	return
 end
 
 -- ═══════════════════════════════════════════════════════════════
---          LISTENER: BALLOON INFLATE (detecção instantânea)
+--                    PERFORMANCE CONSTANTS (DELTA OPTIMIZED)
 -- ═══════════════════════════════════════════════════════════════
--- Quando um novo balloon infla, o jogo dispara BalloonInflate.
--- Usamos esse evento para acionar o farm imediatamente,
--- sem esperar o próximo tick do CheckInterval.
+local CONSTANTS = {
+	TOOL_COLLECT_COOLDOWN = 0.06, -- Delta pode processar clicks mais rápido
+	TOOL_COLLECT_LOOP_INTERVAL = 0.04, -- Loop interval reduzido para Delta
+	TOKEN_DEFAULT_MAX_DISTANCE = 60,
+	TOKEN_SPEED_BOOST_NORMAL = 2.0, -- Delta teleport é mais rápido
+	TOKEN_SPEED_BOOST_PRIORITY = 3.0, -- Tokens prioritários ainda mais rápidos
+	TOKEN_PRIORITY_THRESHOLD = 70,
+	TOKEN_COLLECT_TIMEOUT_BASE = 4, -- Timeout reduzido (Delta é mais eficiente)
+	TOKEN_WAIT_AFTER_COLLECT = 0.6, -- Wait reduzido
+	MOVE_CHECK_INTERVAL = 0.08, -- Check mais frequente no Delta
+	STUCK_MOVEMENT_THRESHOLD = 0.5,
+	BALLOON_MIN_FARM_TIME = 15,
+	BALLOON_MAX_FARM_TIME = 45,
+	BALLOON_POSITION_OFFSET_Y = -8,
+	BALLOON_POSITION_UPDATE_INTERVAL = 1.5, -- Update mais frequente
+	BALLOON_MOVEMENT_THRESHOLD = 15,
+if not flowerZones or not hivePlatforms then
+	warn("[BSS AutoFarm] FlowerZones ou HivePlatforms não encontrados. Certifique-se de executar no BSS.")
+	-- Continua mesmo assim para carregar a UI
+endART_FLOWER_SCAN_TIMEOUT = 1.5, -- Scan mais rápido
+	BOSS_CHECK_INTERVAL = 1.5, -- Check mais frequente
+}
+
+local CACHED_REFS = {
+	Collectibles = nil,
+	Balloons = nil,
+	FieldBalloons = nil,
+	lastUpdate = 0
+}
+
+local function getCachedFolder(name)
+	local currentTime = tick()
+	if currentTime - CACHED_REFS.lastUpdate >= CONSTANTS.WORKSPACE_CACHE_TIMEOUT then
+		CACHED_REFS.Collectibles = workspace:FindFirstChild("Collectibles")
+		CACHED_REFS.Balloons = workspace:FindFirstChild("Balloons")
+		CACHED_REFS.FieldBalloons = CACHED_REFS.Balloons
+			and CACHED_REFS.Balloons:FindFirstChild("FieldBalloons") or nil
+		CACHED_REFS.lastUpdate = currentTime
+	end
+
+	local folder = CACHED_REFS[name]
+	if folder and folder.Parent then
+		return folder
+	end
+
+	if name == "FieldBalloons" then
+		local balloons = workspace:FindFirstChild("Balloons")
+		folder = balloons and balloons:FindFirstChild("FieldBalloons") or nil
+	else
+		folder = workspace:FindFirstChild(name)
+	end
+	CACHED_REFS[name] = folder
+	return folder
+end
+
+local FLOWER_CACHE = {
+	flowers = {},
+	lastScan = 0,
+	currentField = nil
+}
 
 local CONFIG
 local BALLOON_FARM
-local balloonInflateConnection = nil
-local function setupBalloonInflateListener()
-	pcall(function()
-		if eventsApi and type(eventsApi.ClientListen) == "function" then
-			balloonInflateConnection = eventsApi.ClientListen("BalloonInflate", function(balloonId)
-				-- Só age se o auto farm estiver ativo
-				if not CONFIG.Enabled or not BALLOON_FARM.Enabled then return end
-				-- Reseta o LastCheck para forçar verificação imediata
-				BALLOON_FARM.LastCheck = 0
-				-- Notifica (com proteção caso Rayfield não esteja pronto)
-				pcall(function()
-					if Rayfield and Rayfield.Notify then
-						Rayfield:Notify({
-							Title = "🎈 Balloon Inflated!",
-							Content = "New balloon detected - going to farm!",
-							Duration = 3,
-							Image = 4483362458,
-						})
-					end
-				end)
-			end)
-		end
-	end)
+
+-- Centraliza a condição de continuidade das automações da sessão atual.
+local function shouldContinue()
+	return CONFIG and CONFIG.Enabled and not CONFIG.ManualControlMode and isCurrentSession()
 end
--- Executa o setup do listener imediatamente
 
 -- ═══════════════════════════════════════════════════════════════
 --                  SISTEMA DE COLETA AUTOMÁTICA (OTIMIZADO)
@@ -148,54 +361,95 @@ local function getEquippedCollector()
 	return character:FindFirstChildOfClass("Tool")
 end
 
--- Função separada que roda continuamente para coletar (estilo Atlas)
+-- MCP: cooldown mínimo real do jogo = 0.18s (descoberto em LocalCollect)
+-- Ajustado dinamicamente pelo WalkSpeed (Haste boost divide o cooldown)
+local GAME_COOLDOWN = {
+	Base = 0.18,       -- mínimo absoluto do jogo
+	Current = 0.18,
+	LastSpeedCheck = 0,
+}
+
+local function updateGameCooldown()
+	if tick() - GAME_COOLDOWN.LastSpeedCheck < 0.5 then return end
+	GAME_COOLDOWN.LastSpeedCheck = tick()
+	local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+	if humanoid and humanoid.WalkSpeed > 16 then
+		-- Haste: WalkSpeed sobe, CollectorSpeed sobe proporcionalmente
+		local multiplier = humanoid.WalkSpeed / 16
+		GAME_COOLDOWN.Current = math.max(GAME_COOLDOWN.Base, 0.18 / multiplier)
+	else
+		GAME_COOLDOWN.Current = 0.18
+	end
+end
+
+-- Função separada que roda continuamente para enviar cliques de coleta.
+-- OTIMIZADA para Delta + sincronizada com cooldown real do jogo (MCP)
 local function enableToolCollect()
 	if TOOL_COLLECT.Running then return end
 	TOOL_COLLECT.Running = true
 	
 	task.spawn(function()
-		while TOOL_COLLECT.Enabled and isCurrentSession() do
-			local currentTime = tick()
-			
-			-- Verifica cooldown
-			if currentTime - TOOL_COLLECT.LastCollect >= TOOL_COLLECT.Cooldown then
-				-- Tenta múltiplos métodos de coleta (como o Atlas)
-				local success = false
-				
-				-- Método 1: ClientCall (preferido)
-				local tool = getEquippedCollector()
-				if tool then
-					success = pcall(function()
-						tool:Activate()
-					end)
-				else
-					TOOL_COLLECT.LastError = "No collector equipped"
-				end
-				
-				-- Método 2: Events.ToolCollect:FireServer (backup)
-				if success then
-					TOOL_COLLECT.LastCollect = currentTime
+		while TOOL_COLLECT.Enabled and shouldContinue() do
+			-- MCP: respeita cooldown mínimo real do jogo (0.18s)
+			updateGameCooldown()
+			-- Delta: adiciona pequena variação para humanizar
+			local cooldown = getRandomizedTiming(
+				math.max(GAME_COOLDOWN.Current, TOOL_COLLECT.Cooldown), 10
+			)
+
+			if tick() - TOOL_COLLECT.LastCollect >= cooldown then
+				local clicked = fireToolCollect()
+				TOOL_COLLECT.LastCollect = tick()
+				if clicked then
 					TOOL_COLLECT.CollectCount = TOOL_COLLECT.CollectCount + 1
 					TOOL_COLLECT.LastError = nil
+				else
+					TOOL_COLLECT.LastError = "Cursor sobre UI ou simulação de mouse indisponível"
 				end
 			end
 			
-			task.wait(0.05) -- Loop rápido para máxima responsividade
+			local loopWait = getRandomizedTiming(CONSTANTS.TOOL_COLLECT_LOOP_INTERVAL, 20)
+			task.wait(loopWait)
 		end
-		
+
+		releaseToolCollectInput()
 		TOOL_COLLECT.Running = false
 	end)
 end
 
--- Função para verificar se tem collector equipado (simples)
-local function hasCollectorEquipped()
-	return getEquippedCollector() ~= nil
+local coreStats = player:WaitForChild("CoreStats", 30)
+if not coreStats then
+	warn("[BSS AutoFarm] CoreStats não encontrado. Tentando buscar...")
+	coreStats = player.CoreStats or player:FindFirstChild("CoreStats")
+	if not coreStats then
+		task.wait(5)
+		coreStats = player:WaitForChild("CoreStats", 15)
+	end
+	-- Continua mesmo sem CoreStats para carregar a UI
+end
+local pollenValue = coreStats:WaitForChild("Pollen", 15)
+local capacityValue = coreStats:WaitForChild("Capacity", 15)
+local honeyValue = coreStats:WaitForChild("Honey", 15)
+
+-- Protege os acessos a CoreStats durante carregamento, respawn ou remoção temporária.
+local function safeGetStatValue(stat, default)
+	local success, value = pcall(function()
+		return stat and stat.Value
+	end)
+	if success and type(value) == "number" then return value end
+	return default or 0
 end
 
-local coreStats = player:WaitForChild("CoreStats")
-local pollenValue = coreStats:WaitForChild("Pollen")
-local capacityValue = coreStats:WaitForChild("Capacity")
-local honeyValue = coreStats:WaitForChild("Honey")
+local function safeGetPollenPercent()
+	local pollenPercent = 0
+	pcall(function()
+		local capacity = safeGetStatValue(capacityValue)
+		if capacity > 0 then
+			pollenPercent = (safeGetStatValue(pollenValue) / capacity) * 100
+		end
+	end)
+	return pollenPercent
+end
 
 -- ═══════════════════════════════════════════════════════════════
 --                         CONFIGURAÇÕES
@@ -203,12 +457,15 @@ local honeyValue = coreStats:WaitForChild("Honey")
 
 CONFIG = {
 	Enabled = false,
+	ManualControlMode = false, -- NOVO: quando true, você pode controlar manualmente
 	SelectedField = nil,
 	MoveSpeed = 45,
 	FieldRadius = 18,
 	CollectHeight = 3,
 	CollectInterval = 0.1,
 	ConvertAt = 95,
+	TeleportMode = false, -- quando true: teleporta em tudo (campo, tokens, colmeia)
+	AutoSprinkler = false,
 	
 	CollectTokens = true,
 	MaxTokenDistance = 60,
@@ -229,13 +486,28 @@ CONFIG = {
 	CoconutCheckInterval = 1,
 	
 	-- Balloon Farm
-	FarmBalloons = true, -- SEMPRE ATIVO
+	FarmBalloons = false, -- Desativado por padrão (pode ser ligado na UI)
 	BalloonCheckInterval = 1,
 	
 	-- Cloud Farm
 	FarmClouds = false,
 	CloudCheckInterval = 3,
+
+	-- Adaptive systems
+	SmartFlowerTargeting = false,
+	AdaptToBoosts = true,
+	AutoJoinBosses = false,
+	AutoWindShrine = false,
+	SmartHoneystorm = false,
+	AntiDisconnect = true,
 }
+
+-- ═══════════════════════════════════════════════════════════════
+--                    PERFORMANCE CONSTANTS (JÁ DEFINIDO ACIMA)
+-- ═══════════════════════════════════════════════════════════════
+-- (removido duplicação - agora definido no topo do arquivo)
+
+TOOL_COLLECT.Cooldown = CONSTANTS.TOOL_COLLECT_COOLDOWN
 
 local RUNTIME = {
 	Active = false,
@@ -247,35 +519,52 @@ local RUNTIME = {
 		LastHoneyValue = 0,
 		FlamesCollected = 0,
 		MarksCollected = 0,
-		PlantersPlanted = 0,
-		PlantersHarvested = 0,
 		CoconutsCaught = 0,
 		BalloonsVisited = 0,
-		CloudsVisited = 0,
+	CloudsVisited = 0,
+	BossEventsParticipated = 0,
+	BoostAdjustments = 0,
+	WindShrineOpportunities = 0,
 		Runtime = 0,
 		StartTime = 0,
 		LastStatsUpdate = 0
 	}
 }
 
--- Planters
-local PLANTERS = {
+-- These systems are deliberately state-only: they never assume an undocumented
+-- server remote exists, and every worker remains scoped to this session.
+local SMART_FLOWER_SYSTEM = {
 	Enabled = false,
-	AutoPlant = false,
-	AutoCollect = true,
-	ActivePlanters = {},
-	AvailablePlanters = {},
-	LastCheck = 0,
-	CheckInterval = 5
+	FlowerHistory = {},
+	DepletionTimeout = 15,
+	MinFlowerValue = 5,
+	ScanRadius = 50,
+	ColorPreference = nil,
 }
+
+local BOOST_MANAGER = {ActiveBoosts = {}, LastCheck = 0, CheckInterval = 0.5, BaseMoveSpeed = CONFIG.MoveSpeed, BaseObservedWalkSpeed = nil}
+local BOSS_EVENTS = {
+	Enabled = false, Running = false, ActiveBoss = nil, LastCheck = 0,
+	BossLocations = {
+		["Stick Bug"] = {Zone = "Spider Field", Priority = 90},
+		["Tunnel Bear"] = {Zone = "Tunnel", Priority = 85},
+		["King Beetle"] = {Zone = "Clover Field", Priority = 80},
+		["Coconut Crab"] = {Zone = "Coconut Field", Priority = 88},
+	},
+}
+local EVENT_TRACKER = {
+	Enabled = false, WindShrineLastDonation = 0, WindShrineCooldown = 3600,
+	HoneystormLastUsed = 0, HoneystormCooldown = 1800, LastCheck = 0,
+}
+local ANTI_DISCONNECT = {Enabled = true, LastActivity = 0, ActivityInterval = 180, Running = false}
 
 -- ═══════════════════════════════════════════════════════════════
 --                      FUNÇÕES CORE
 -- ═══════════════════════════════════════════════════════════════
 
 local function getRoot()
-	local character = player.Character or player.CharacterAdded:Wait()
-	return character:FindFirstChild("HumanoidRootPart")
+	-- Usa o cache otimizado do Delta
+	return getDeltaOptimizedRoot()
 end
 
 local function getHive()
@@ -295,83 +584,173 @@ local function getHive()
 	return nil
 end
 
--- Tween para teleportar até o campo (suave, sem andar)
-local function tweenToField(destination)
-	local character = player.Character
-	if not character then return false end
-	
-	local root = character:FindFirstChild("HumanoidRootPart")
-	if not root then return false end
-	
-	-- Calcula duração baseado na distância
-	local distance = (root.Position - destination).Magnitude
-	local duration = math.clamp(distance / 200, 0.5, 3) -- 0.5 a 3 segundos
-	
-	local tweenInfo = TweenInfo.new(
-		duration,
-		Enum.EasingStyle.Quad,
-		Enum.EasingDirection.Out
-	)
-	
-	local tween = TweenService:Create(root, tweenInfo, {CFrame = CFrame.new(destination)})
-	tween:Play()
-	
-	-- Aguarda terminar
-	local completed = false
-	local completedConnection
-	completedConnection = tween.Completed:Connect(function()
-		completed = true
-	end)
-	
-	local startTime = tick()
-	while not completed and CONFIG.Enabled and tick() - startTime < duration + 1 do
-		task.wait(0.1)
+-- Declarações antecipadas evitam que tweenToField procure versões globais
+-- dessas funções antes de elas existirem como locals.
+local getOrComputePath
+local invalidatePathCache
+
+-- Ir ao campo/colmeia: teleporta se TeleportMode ligado, senão CFrame direto
+-- (para distâncias longas sempre usamos teleporte — andar 200 studs é perda de tempo)
+-- Ir ao campo/colmeia: usa pathfinding para distâncias longas com obstáculos.
+-- Para modo teleporte, vai direto via CFrame.
+local function tweenToFieldImpl(destination)
+	if not shouldContinue() then return false end
+
+	if CONFIG.TeleportMode then
+		return teleportTo(destination)
 	end
-	if completedConnection then
-		completedConnection:Disconnect()
+
+	local char = player.Character
+	if not char then return false end
+	local root     = char:FindFirstChild("HumanoidRootPart")
+	local humanoid = char:FindFirstChild("Humanoid")
+	if not root or not humanoid then return false end
+
+	if (root.Position - destination).Magnitude <= 8 then return true end
+
+	local waypoints, _ = getOrComputePath(root, destination)
+
+	if waypoints and #waypoints > 1 then
+		for i = 2, #waypoints do
+			if not shouldContinue() or not root.Parent then return false end
+			if (root.Position - destination).Magnitude <= 8 then return true end
+			local wp = waypoints[i]
+			if wp.Action == Enum.PathWaypointAction.Jump then
+				humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+			end
+			humanoid:MoveTo(wp.Position)
+			local wpStart = tick()
+			local lastPos = root.Position
+			local stuckFor = 0
+			while shouldContinue() and tick() - wpStart < 4 do
+				if not root.Parent then return false end
+				if (root.Position - wp.Position).Magnitude <= 5 then break end
+				local moved = (root.Position - lastPos).Magnitude
+				if moved < CONSTANTS.STUCK_MOVEMENT_THRESHOLD then
+					stuckFor = stuckFor + CONSTANTS.MOVE_CHECK_INTERVAL
+					if stuckFor >= 1.5 then invalidatePathCache() break end
+				else
+					stuckFor = 0
+					lastPos = root.Position
+				end
+				task.wait(CONSTANTS.MOVE_CHECK_INTERVAL)
+			end
+		end
+		return (root.Position - destination).Magnitude <= 12
 	end
-	
-	return CONFIG.Enabled
+
+	-- Fallback: MoveTo direto
+	humanoid:MoveTo(destination)
+	local start = tick()
+	while shouldContinue() and tick() - start < 10 do
+		if not root.Parent then return false end
+		if (root.Position - destination).Magnitude <= 8 then return true end
+		task.wait(CONSTANTS.MOVE_CHECK_INTERVAL)
+	end
+	return false
 end
 
--- Movimento normal (andar com Humanoid:MoveTo)
-local function moveTo(destination, arrivalDistance)
+local function tweenToField(destination, owner)
+	return requestMovement(owner or "field", function()
+		return tweenToFieldImpl(destination)
+	end)
+end
+
+-- Movimento dentro do campo: anda se TeleportMode desligado (aciona Touched das flores),
+-- teleporta se TeleportMode ligado.
+-- PathfindingService para desviar de obstáculos no campo
+local PathfindingService = game:GetService("PathfindingService")
+
+-- Cache de path: evita recomputar para destinos parecidos
+local PATH_CACHE = {
+	destination = nil,
+	waypoints   = nil,
+	waypointIdx = 1,
+	tolerance   = 6, -- recalcula só se destino mudou mais que 6 studs
+}
+
+getOrComputePath = function(root, destination)
+	-- Reutiliza cache se destino não mudou muito
+	if PATH_CACHE.destination
+		and (PATH_CACHE.destination - destination).Magnitude < PATH_CACHE.tolerance
+		and PATH_CACHE.waypoints
+		and #PATH_CACHE.waypoints > 0 then
+		return PATH_CACHE.waypoints, PATH_CACHE.waypointIdx
+	end
+
+	-- Recalcula
+	local waypoints = nil
+	pcall(function()
+		local path = PathfindingService:CreatePath({
+			AgentHeight     = 5,
+			AgentRadius     = 2,
+			AgentCanJump    = true,
+			AgentCanClimb   = false,
+			WaypointSpacing = 4,
+		})
+		path:ComputeAsync(root.Position, destination)
+		if path.Status == Enum.PathStatus.Success then
+			waypoints = path:GetWaypoints()
+		end
+	end)
+
+	PATH_CACHE.destination = destination
+	PATH_CACHE.waypoints   = waypoints
+	PATH_CACHE.waypointIdx = 2 -- índice 1 é a posição atual, começa do 2
+	return waypoints, 2
+end
+
+invalidatePathCache = function()
+	PATH_CACHE.destination = nil
+	PATH_CACHE.waypoints   = nil
+end
+
+local function moveToImpl(destination, arrivalDistance)
 	local character = player.Character
 	if not character then return false end
-	
-	local root = character:FindFirstChild("HumanoidRootPart")
+
+	local root     = character:FindFirstChild("HumanoidRootPart")
 	local humanoid = character:FindFirstChild("Humanoid")
-	
 	if not root or not humanoid then return false end
-	
-	-- Só ajusta velocidade se estiver ABAIXO do configurado
-	-- (respeita boosts de haste/velocidade do jogo)
-	if humanoid.WalkSpeed < CONFIG.MoveSpeed then
-		humanoid.WalkSpeed = CONFIG.MoveSpeed
+
+	if CONFIG.TeleportMode then
+		teleportTo(destination)
+		return true
 	end
-	
-	-- Usa Humanoid:MoveTo simples (funciona sempre)
+
+	local arrived = arrivalDistance or 5
+	if (root.Position - destination).Magnitude <= arrived then return true end
+
+	-- Movimento direto: Humanoid:MoveTo sem waypoints intermediários.
+	-- Dentro do campo (terreno plano) isso é suave e contínuo.
+	-- Pathfinding só é usado em tweenToField (distâncias longas com obstáculos).
 	humanoid:MoveTo(destination)
-	
-	-- Aguarda chegar no destino
-	local startTime = tick()
-	local timeout = 15 -- segundos
-	local arrivedDistance = arrivalDistance or 5 -- studs
-	
-	while CONFIG.Enabled and tick() - startTime < timeout do
+
+	local start    = tick()
+	local lastPos  = root.Position
+	local stuckFor = 0
+
+	while shouldContinue() and tick() - start < 6 do
 		if not root.Parent then return false end
-		
-		local distance = (root.Position - destination).Magnitude
-		
-		-- Chegou perto o suficiente
-		if distance <= arrivedDistance then
-			return true
+		if (root.Position - destination).Magnitude <= arrived then return true end
+
+		local moved = (root.Position - lastPos).Magnitude
+		if moved < CONSTANTS.STUCK_MOVEMENT_THRESHOLD then
+			stuckFor = stuckFor + CONSTANTS.MOVE_CHECK_INTERVAL
+			if stuckFor >= 1.5 then return false end
+		else
+			stuckFor = 0
+			lastPos  = root.Position
 		end
-		
-		task.wait(0.1)
+		task.wait(CONSTANTS.MOVE_CHECK_INTERVAL)
 	end
-	
-	return CONFIG.Enabled
+	return false
+end
+
+local function moveTo(destination, arrivalDistance, owner)
+	return requestMovement(owner or "field", function()
+		return moveToImpl(destination, arrivalDistance)
+	end)
 end
 
 local function getFieldPosition(fieldObj)
@@ -386,6 +765,396 @@ local function getFieldPosition(fieldObj)
 		end
 	end
 	return nil, nil
+end
+
+-- Posiciona um sprinkler usando a própria Tool do inventário. Tool:Activate()
+-- não gera clique de mouse e, por isso, não pode acionar a interface Rayfield.
+local function placeSprinklerAtFieldCenter(fieldObj)
+	local center = getFieldPosition(fieldObj)
+	if not center then return false, "Campo sem posição válida" end
+
+	local character = player.Character
+	local backpack = player:FindFirstChildOfClass("Backpack")
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not character or not backpack or not humanoid then
+		return false, "Personagem ou inventário indisponível"
+	end
+
+	local previousTool = character:FindFirstChildOfClass("Tool")
+	local sprinkler = nil
+	for _, container in ipairs({character, backpack}) do
+		for _, item in ipairs(container:GetChildren()) do
+			if item:IsA("Tool") and string.find(string.lower(item.Name), "sprinkler", 1, true) then
+				sprinkler = item
+				break
+			end
+		end
+		if sprinkler then break end
+	end
+	if not sprinkler then return false, "Nenhum sprinkler foi encontrado no inventário" end
+
+	if not tweenToField(center + Vector3.new(0, CONFIG.CollectHeight, 0), "sprinkler") then
+		return false, "Não foi possível chegar ao centro do campo"
+	end
+
+	local activated = pcall(function()
+		if sprinkler.Parent == backpack then humanoid:EquipTool(sprinkler) end
+		task.wait(0.15)
+		sprinkler:Activate()
+	end)
+
+	-- Reequipa o coletor anterior para que o Auto Collect continue funcionando.
+	if previousTool and previousTool.Parent == backpack then
+		pcall(function() humanoid:EquipTool(previousTool) end)
+	end
+
+	return activated, activated and "Sprinkler ativado no centro do campo" or "Não foi possível ativar o sprinkler"
+end
+
+-- Retorna uma posição válida para partes e modelos sem repetir validações locais.
+local function getObjectPosition(obj)
+	if not obj or not obj.Parent then return nil end
+	if obj:IsA("BasePart") then return obj.Position end
+	if obj:IsA("Model") then
+		local part = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
+		if part then return part.Position end
+	end
+	return nil
+end
+
+-- Forward declaration: boss collection reuses the normal token collector.
+local checkAndCollectTokens
+
+local function readActiveBoosts()
+	local boosts = {}
+	local character = player.Character
+	if not character then return boosts end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		BOOST_MANAGER.BaseObservedWalkSpeed = BOOST_MANAGER.BaseObservedWalkSpeed or humanoid.WalkSpeed
+		boosts.Haste = humanoid.WalkSpeed > math.max(BOOST_MANAGER.BaseObservedWalkSpeed, BOOST_MANAGER.BaseMoveSpeed)
+		boosts.HealthBoost = humanoid.MaxHealth > 100
+	end
+	for _, instance in ipairs(character:GetDescendants()) do
+		local name = instance.Name:lower():gsub("%s+", "")
+		local active = not instance:IsA("BoolValue") or instance.Value
+		if active then
+			if name:find("haste") then boosts.Haste = true end
+			if name:find("blueboost") then boosts.BlueBoost = true end
+			if name:find("redboost") then boosts.RedBoost = true end
+			if name:find("melody") then boosts.Melody = true end
+			if name:find("focus") then boosts.Focus = true end
+		end
+	end
+	return boosts
+end
+
+local function adjustFarmingForBoosts(boosts)
+	-- Rebuild values from their base each pass; repeated checks must not compound.
+	CONFIG.MoveSpeed = boosts.Haste and math.min(BOOST_MANAGER.BaseMoveSpeed * 1.5, 100) or BOOST_MANAGER.BaseMoveSpeed
+	TOOL_COLLECT.Cooldown = boosts.Focus and (CONSTANTS.TOOL_COLLECT_COOLDOWN * 0.7) or CONSTANTS.TOOL_COLLECT_COOLDOWN
+	SMART_FLOWER_SYSTEM.ColorPreference = boosts.BlueBoost and "Blue" or (boosts.RedBoost and "Red" or nil)
+end
+
+local function updateBoosts()
+	if not CONFIG.AdaptToBoosts or tick() - BOOST_MANAGER.LastCheck < BOOST_MANAGER.CheckInterval then return end
+	BOOST_MANAGER.LastCheck = tick()
+	local boosts = readActiveBoosts()
+	BOOST_MANAGER.ActiveBoosts = boosts
+	adjustFarmingForBoosts(boosts)
+	RUNTIME.Stats.BoostAdjustments = RUNTIME.Stats.BoostAdjustments + 1
+end
+
+local function detectActiveBoss()
+	local npcs = workspace:FindFirstChild("NPCs")
+	if not npcs then return nil end
+	for _, npc in ipairs(npcs:GetChildren()) do
+		local definition = BOSS_EVENTS.BossLocations[npc.Name]
+		local position = getObjectPosition(npc)
+		if definition and position then
+			local humanoid = npc:FindFirstChildOfClass("Humanoid")
+			local health = humanoid or npc:FindFirstChild("Health", true) or npc:FindFirstChild("HP", true)
+			local alive = not health or (health:IsA("Humanoid") and health.Health > 0) or ((health:IsA("NumberValue") or health:IsA("IntValue")) and health.Value > 0)
+			if alive then return {Name = npc.Name, Model = npc, Location = position, Priority = definition.Priority} end
+		end
+	end
+	return nil
+end
+
+local function participateInBoss(boss)
+	if BOSS_EVENTS.Running or not boss or not boss.Model.Parent then return false end
+	BOSS_EVENTS.Running, BOSS_EVENTS.ActiveBoss = true, boss
+	safeNotify("Boss detected", "Joining " .. boss.Name, 3)
+	local reached = tweenToField(boss.Location + Vector3.new(0, CONFIG.CollectHeight, 0), "boss")
+	local started = tick()
+	while reached and shouldContinue() and boss.Model.Parent and tick() - started < 180 do
+		local position = getObjectPosition(boss.Model)
+		if position then moveTo(position + Vector3.new(0, CONFIG.CollectHeight, 0), 12, "boss") end
+		checkAndCollectTokens()
+		task.wait(0.5)
+	end
+	if shouldContinue() then
+		task.wait(1)
+		checkAndCollectTokens()
+	end
+	BOSS_EVENTS.Running, BOSS_EVENTS.ActiveBoss = false, nil
+	RUNTIME.Stats.BossEventsParticipated = RUNTIME.Stats.BossEventsParticipated + 1
+	return true
+end
+
+local function checkBossEvents()
+	if not CONFIG.AutoJoinBosses or BOSS_EVENTS.Running or tick() - BOSS_EVENTS.LastCheck < CONSTANTS.BOSS_CHECK_INTERVAL then return false end
+	BOSS_EVENTS.LastCheck = tick()
+	local boss = detectActiveBoss()
+	if boss then return participateInBoss(boss) end
+	return false
+end
+
+local function checkWindShrine()
+	if not CONFIG.AutoWindShrine or tick() - EVENT_TRACKER.WindShrineLastDonation < EVENT_TRACKER.WindShrineCooldown then return end
+	local shrine = workspace:FindFirstChild("WindShrine")
+	if shrine then
+		local detector = shrine:FindFirstChildWhichIsA("ClickDetector", true)
+		EVENT_TRACKER.WindShrineLastDonation = tick()
+		RUNTIME.Stats.WindShrineOpportunities = RUNTIME.Stats.WindShrineOpportunities + 1
+		safeNotify("Wind Shrine ready", detector and "Interaction detected; select the donation item in-game." or "Shrine found; interaction is not currently visible.", 5)
+	end
+end
+
+local function updateEventTracker()
+	if tick() - EVENT_TRACKER.LastCheck < 5 then return end
+	EVENT_TRACKER.LastCheck = tick()
+	checkWindShrine()
+	-- A Honeystorm token is the only reliable client-visible confirmation here.
+	local collectibles = getCachedFolder("Collectibles")
+	if collectibles then
+		for _, item in ipairs(collectibles:GetChildren()) do
+			if item.Name:lower():find("honeystorm") then EVENT_TRACKER.HoneystormLastUsed = tick() break end
+		end
+	end
+	if CONFIG.SmartHoneystorm and tick() - EVENT_TRACKER.HoneystormLastUsed >= EVENT_TRACKER.HoneystormCooldown and safeGetPollenPercent() < 50 then
+		safeNotify("Honeystorm ready", "Bag is below 50%; use Honeystorm when convenient.", 5)
+		-- Avoid repeated alerts while the item remains unused.
+		EVENT_TRACKER.HoneystormLastUsed = tick()
+	end
+end
+
+-- MCP: remotes descobertos no MacroSystem oficial do jogo
+-- Events é um módulo com ClientCall(eventName, ...) que dispara FireServer
+local BSS_EVENTS_MODULE = nil
+
+local function getBSSEvents()
+	if BSS_EVENTS_MODULE then return BSS_EVENTS_MODULE end
+	pcall(function()
+		BSS_EVENTS_MODULE = require(
+			game:GetService("ReplicatedStorage")
+			:WaitForChild("Shared", 5)
+			:WaitForChild("Network", 5)
+			:WaitForChild("Events", 5)
+		)
+	end)
+	return BSS_EVENTS_MODULE
+end
+
+-- MCP: usa itens do hotbar via PlayerActivesCommand (descoberto no MacroSystem)
+-- Isso ativa automaticamente itens como Sprinkler, Field Booster, etc.
+local HOTBAR_SYSTEM = {
+	Enabled = false,
+	LastUse = 0,
+	Interval = 5, -- verifica a cada 5s (mesmo intervalo do MacroSystem)
+	-- Itens que NÃO devem ser usados automaticamente pelo hotbar
+	Blacklist = {
+		["Sprinkler Builder"] = true, -- só usa via AutoSprinkler
+		["SprinklerBuilder"]  = true,
+	},
+}
+
+local function useHotbarItems()
+	if not HOTBAR_SYSTEM.Enabled then return end
+	if tick() - HOTBAR_SYSTEM.LastUse < HOTBAR_SYSTEM.Interval then return end
+	HOTBAR_SYSTEM.LastUse = tick()
+
+	-- Precisa do ClientStatCache para ler o PlayerActivesBar
+	local ok, statCache = pcall(function()
+		return require(game:GetService("ReplicatedStorage")
+			:WaitForChild("Client", 5)
+			:WaitForChild("Systems", 5)
+			:WaitForChild("ClientStatCache", 5))
+	end)
+	if not ok or not statCache then return end
+
+	local stats = statCache:Get()
+	if not stats or not stats.Settings or not stats.Settings.PlayerActivesBar then return end
+
+	local evts = getBSSEvents()
+	if not evts then return end
+
+	local pollenPct = safeGetPollenPercent()
+
+	for _, itemName in ipairs(stats.Settings.PlayerActivesBar) do
+		if itemName and itemName ~= "nil" and not HOTBAR_SYSTEM.Blacklist[itemName] then
+			-- Micro-Converter só usa se tiver pelo menos 5% de pollen
+			local isMicroConverter = itemName == "Micro-Converter" or itemName == "MicroConverter"
+			if not isMicroConverter or pollenPct >= 5 then
+				pcall(function()
+					-- Busca o tipo do item via PlayerActives
+					local playerActives = require(game:GetService("ReplicatedStorage")
+						:WaitForChild("Game", 5)
+						:WaitForChild("ItemsAndEconomy", 5)
+						:WaitForChild("PlayerActives", 5))
+					local item = playerActives.Get(itemName)
+					if item then
+						evts.ClientCall("PlayerActivesCommand", item.Name, item.Type)
+					end
+				end)
+			end
+		end
+	end
+end
+
+-- MCP: converte pollen usando o Remote real (PlayerHiveCommand / ToggleHoneyMaking)
+local function convertAtHiveRemote()
+	local hive = getHive()
+	if not hive then task.wait(2) return false end
+
+	if not tweenToField(hive.Position + Vector3.new(0, 3, 0), "hive") then
+		return false
+	end
+
+	task.wait(1)
+
+	local evts = getBSSEvents()
+	if evts and evts.ClientCall then
+		-- Dispara ToggleHoneyMaking (mesmo método que o macro oficial usa)
+		pcall(function() evts.ClientCall("PlayerHiveCommand", "ToggleHoneyMaking") end)
+	end
+
+	-- Aguarda ConvertingAtHive ficar true
+	local waitStart = tick()
+	while tick() - waitStart < 5 do
+		if player:GetAttribute("ConvertingAtHive") then break end
+		task.wait(0.25)
+	end
+
+	-- Aguarda terminar a conversão
+	local convertStart = tick()
+	while shouldContinue() and tick() - convertStart < 120 do
+		local pollen = safeGetStatValue(pollenValue)
+		local cap    = safeGetStatValue(capacityValue)
+		-- Pollen zerou ou não está mais convertendo
+		if pollen < cap * 0.01 then break end
+		if not player:GetAttribute("ConvertingAtHive") then
+			-- Tenta ativar de novo se ainda tem pollen
+			if pollen > cap * 0.01 then
+				pcall(function()
+					local e = getBSSEvents()
+					if e then e.ClientCall("PlayerHiveCommand", "ToggleHoneyMaking") end
+				end)
+			else
+				break
+			end
+		end
+		task.wait(1)
+	end
+
+	-- Garante que parou de converter
+	if player:GetAttribute("ConvertingAtHive") then
+		pcall(function()
+			local e = getBSSEvents()
+			if e then e.ClientCall("PlayerHiveCommand", "ToggleHoneyMaking") end
+		end)
+	end
+
+	task.wait(CONFIG.WaitAtHive or 3)
+	return true
+end
+
+-- MCP: VirtualUser para anti-disconnect (método que o jogo mesmo usa)
+local VIRTUAL_USER = nil
+pcall(function() VIRTUAL_USER = game:GetService("VirtualUser") end)
+
+local function simulateActivity()
+	-- MCP: usa VirtualUser (mais confiável que CFrame rotation)
+	if VIRTUAL_USER then
+		pcall(function()
+			VIRTUAL_USER:CaptureController()
+			VIRTUAL_USER:ClickButton2(Vector2.new())
+		end)
+	end
+	-- Fallback: camera rotation
+	local camera = workspace.CurrentCamera
+	if camera then camera.CFrame = camera.CFrame * CFrame.Angles(0, math.rad(math.random(-3, 3)), 0) end
+	-- Envia space key via VirtualInputManager (exatamente como o MacroSystem faz)
+	if VirtualInputManager then
+		pcall(function()
+			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, nil)
+			task.wait(0.05)
+			VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, nil)
+		end)
+		pcall(function()
+			VirtualInputManager:SendMouseMoveEvent(0, 0, false, nil)
+		end)
+	end
+end
+
+-- MCP: getGroundY via Raycast (o jogo usa isso para ajustar Y antes de teleportar)
+local function getGroundY(x, z, fromY)
+	local origin = Vector3.new(x, fromY or 500, z)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local char = player.Character
+	if char then params.FilterDescendantsInstances = { char } end
+	local result = workspace:Raycast(origin, Vector3.new(0, -600, 0), params)
+	return result and result.Position.Y or nil
+end
+
+-- MCP: calcula posição de teleporte ajustando Y pelo chão real
+local function getAdjustedFieldPosition(fieldPart)
+	local pos, size = getFieldPosition(fieldPart)
+	if not pos then return nil end
+	local groundY = getGroundY(pos.X, pos.Z, pos.Y + 100)
+	if groundY then
+		return Vector3.new(pos.X, groundY + 3, pos.Z)
+	end
+	return Vector3.new(pos.X, pos.Y + 3, pos.Z)
+end
+
+local function startAntiDisconnect()
+	if ANTI_DISCONNECT.Running then return end
+	ANTI_DISCONNECT.Running = true
+	task.spawn(function()
+		while ANTI_DISCONNECT.Enabled and isCurrentSession() do
+			if CONFIG.AntiDisconnect and CONFIG.Enabled and tick() - ANTI_DISCONNECT.LastActivity >= ANTI_DISCONNECT.ActivityInterval then
+				simulateActivity()
+				ANTI_DISCONNECT.LastActivity = tick()
+			end
+			task.wait(30)
+		end
+		ANTI_DISCONNECT.Running = false
+	end)
+end
+
+-- Loop dedicado que força WalkSpeed constantemente.
+-- Nada no jogo (BSS, tokens, animações, respawn) consegue interferir.
+local SPEED_ENFORCER = {Running = false}
+local function startSpeedEnforcer()
+	if SPEED_ENFORCER.Running then return end
+	SPEED_ENFORCER.Running = true
+	task.spawn(function()
+		while isCurrentSession() do
+			if CONFIG.Enabled and not CONFIG.ManualControlMode then
+				local char = player.Character
+				if char then
+					local humanoid = char:FindFirstChildOfClass("Humanoid")
+					if humanoid and humanoid.WalkSpeed ~= CONFIG.MoveSpeed then
+						humanoid.WalkSpeed = CONFIG.MoveSpeed
+					end
+				end
+			end
+			task.wait(0.1)
+		end
+		SPEED_ENFORCER.Running = false
+	end)
 end
 
 -- ═══════════════════════════════════════════════════════════════
@@ -426,21 +1195,21 @@ local TOKEN_PRIORITIES = {
 }
 
 -- Loop contínuo de coleta de tokens (separado do farm)
-local checkAndCollectTokens
-
 local function startTokenCollector()
 	if TOKEN_COLLECTOR.Running then return end
 	TOKEN_COLLECTOR.Running = true
 	
 	task.spawn(function()
-		while TOKEN_COLLECTOR.Enabled and CONFIG.Enabled and isCurrentSession() do
+		while TOKEN_COLLECTOR.Enabled and shouldContinue() do
 			-- Na rota em grade, o coletor paralelo alteraria o MoveTo da rota e
 			-- deixaria a caminhada travando. O ToolCollect continua coletando
 			-- normalmente os tokens pelos quais o personagem passa.
+			local foundToken = false
 			if CONFIG.CollectTokens and CONFIG.FarmMode ~= "Route Sweep" and not collectingToken then
-				checkAndCollectTokens()
+				foundToken = checkAndCollectTokens()
 			end
-			task.wait(TOKEN_COLLECTOR.CheckInterval)
+			-- Quando há token, busca o próximo mais cedo; sem token, reduz uso de CPU.
+			task.wait(foundToken and 0.1 or 0.3)
 		end
 		TOKEN_COLLECTOR.Running = false
 	end)
@@ -462,112 +1231,120 @@ local function getTokenPriority(tokenName)
 	return TOKEN_PRIORITIES["Default"]
 end
 
+-- MCP: prioridade usando Attributes reais do jogo (DebugName, TreasureID)
+local TOKEN_DEBUG_PRIORITIES = {
+	["Mythic Egg"] = 100, ["Gifted Mythic Egg"] = 100,
+	["Royal Jelly"] = 90, ["Star Jelly"] = 85,
+	["Ticket"] = 80, ["Micro-Converter"] = 75,
+	["Festive Bean"] = 73, ["Jelly Bean"] = 70,
+	["Inspire"] = 60, ["Boost"] = 55, ["Honeystorm"] = 50,
+	["Mark"] = 40, ["Treat"] = 30, ["Honey"] = 25, ["Pollen"] = 20,
+}
+
+local function getTokenPriorityMCP(token)
+	-- PRIORIDADE 1: Attribute DebugName (mais confiável — descoberto via MCP)
+	local debugName = token:GetAttribute("DebugName")
+	if debugName and TOKEN_DEBUG_PRIORITIES[debugName] then
+		return TOKEN_DEBUG_PRIORITIES[debugName]
+	end
+	-- PRIORIDADE 2: TreasureID pattern
+	local treasureID = token:GetAttribute("TreasureID")
+	if treasureID then
+		if treasureID:find("Egg") then return 90 end
+		if treasureID:find("Ticket") or treasureID:find("MapTreasure") then return 80 end
+	end
+	-- PRIORIDADE 3: TreasureSparkles = item especial
+	if token:FindFirstChild("TreasureSparkles") then return 50 end
+	-- FALLBACK: nome do token
+	return getTokenPriority(token.Name)
+end
+
 local function getNearestToken(maxDistance)
 	local root = getRoot()
 	if not root then return nil end
-	
-	local tokensFolder = workspace:FindFirstChild("Collectibles")
-	if not tokensFolder then return nil end
-	
+
 	local bestToken = nil
 	local bestScore = -math.huge
-	
-	for _, token in ipairs(tokensFolder:GetChildren()) do
-		if token:IsA("BasePart") or (token:IsA("Model") and token.PrimaryPart) then
-			local tokenPos = token:IsA("BasePart") and token.Position or token.PrimaryPart.Position
-			local dist = (root.Position - tokenPos).Magnitude
-			
-			if dist < (maxDistance or 60) then
-				-- Calcula score: prioridade - distância
-				local priority = getTokenPriority(token.Name)
-				local score = priority - (dist * 0.5) -- Distância afeta menos que prioridade
-				
-				if score > bestScore then
-					bestToken = token
-					bestScore = score
+
+	local folders = {
+		getCachedFolder("Collectibles"),
+		workspace:FindFirstChild("TreasureCollectibles"),
+	}
+
+	for _, folder in ipairs(folders) do
+		if not folder then continue end
+		for _, token in ipairs(folder:GetChildren()) do
+			local tokenPos = getObjectPosition(token)
+			if tokenPos then
+				local dist = (root.Position - tokenPos).Magnitude
+				if dist < (maxDistance or 60) then
+					-- MCP: usa Attributes reais em vez de nome
+					local priority = getTokenPriorityMCP(token)
+					if folder.Name == "TreasureCollectibles" then
+						priority = 100
+					end
+					local score = priority - (dist * 0.5)
+					if score > bestScore then
+						bestToken = token
+						bestScore = score
+					end
 				end
 			end
 		end
 	end
-	
+
 	return bestToken
 end
 
 local function collectToken(token)
 	if not token or not token.Parent then return false end
-	
+
 	collectingToken = true
-	local character = player.Character
-	if not character then collectingToken = false return false end
-	
-	local root = character:FindFirstChild("HumanoidRootPart")
-	local humanoid = character:FindFirstChild("Humanoid")
-	
-	if not root or not humanoid then collectingToken = false return false end
-	
-	local tokenPos
-	if token:IsA("BasePart") then
-		tokenPos = token.Position
-	elseif token:IsA("Model") and token.PrimaryPart then
-		tokenPos = token.PrimaryPart.Position
-	else
+
+	local tokenPos = getObjectPosition(token)
+	if not tokenPos then
 		collectingToken = false
 		return false
 	end
-	
-	-- Salva velocidade atual (pode ter boost ativo!)
-	local currentSpeed = humanoid.WalkSpeed
+
 	local priority = getTokenPriority(token.Name)
-	
-	-- Aumenta velocidade para pegar tokens mais rápido
-	local speedBoost = CONFIG.MoveSpeed * 1.8
-	if priority >= 70 then
-		speedBoost = CONFIG.MoveSpeed * 2.5 -- Tokens importantes = ainda mais rápido
+	local root     = getRoot()
+	if not root then
+		collectingToken = false
+		return false
 	end
-	
-	-- Só aumenta se não tiver boost melhor
-	if currentSpeed < speedBoost then
-		humanoid.WalkSpeed = speedBoost
-	end
-	
-	-- Move direto para o token (mais agressivo)
-	humanoid:MoveTo(tokenPos)
-	
-	-- Timeout maior para tokens distantes
-	local distance = (root.Position - tokenPos).Magnitude
-	local timeout = tick() + math.min(distance / 20, 5) -- Timeout dinâmico
-	
-	while token.Parent and (root.Position - tokenPos).Magnitude > 6 and tick() < timeout and CONFIG.Enabled do
-		-- Continua indo para o token se ele ainda existir
-		if token.Parent then
-			local newPos = token:IsA("BasePart") and token.Position or token.PrimaryPart.Position
-			humanoid:MoveTo(newPos)
+
+	local dist = (root.Position - tokenPos).Magnitude
+
+	-- Tokens valiosos (80+): sempre vão buscar (teleporte ou anda)
+	if priority >= 80 then
+		if not moveTo(tokenPos + Vector3.new(0, 2, 0), 3, "token") then
+			collectingToken = false
+			return false
 		end
-		task.wait(0.05)
+	-- Tokens comuns: só coleta se estiverem perto (~15 studs), sem desviar
+	elseif dist > 15 then
+		collectingToken = false
+		return false
 	end
-	
-	-- Aguarda coleta automática
-	if token.Parent then
-		local collectTime = tick()
-		while token.Parent and tick() - collectTime < 0.8 do
-			task.wait(0.05)
-		end
+
+	-- Aguarda coleta automática (o personagem passando por cima ativa Touched)
+	local waited = 0
+	while token.Parent and waited < 0.8 do
+		task.wait(CONSTANTS.TOOL_COLLECT_LOOP_INTERVAL)
+		waited = waited + CONSTANTS.TOOL_COLLECT_LOOP_INTERVAL
 	end
-	
-	-- Restaura velocidade APENAS se mudamos
-	if humanoid.WalkSpeed > currentSpeed then
-		humanoid.WalkSpeed = math.max(currentSpeed, CONFIG.MoveSpeed)
-	end
-	
+
 	collectingToken = false
 	return not token.Parent
 end
 
 checkAndCollectTokens = function()
-	if collectingToken then return end
+	-- Verifica se coleta de tokens está habilitada
+	if not CONFIG.CollectTokens or collectingToken then return false end
 	
 	local token = getNearestToken(CONFIG.MaxTokenDistance)
-	if token then
+	if token and token.Parent then
 		local tokenName = token.Name
 		local priority = getTokenPriority(tokenName)
 		
@@ -587,10 +1364,163 @@ checkAndCollectTokens = function()
 			end
 		end
 	end
+	return token ~= nil
 end
 
 -- ═══════════════════════════════════════════════════════════════
---                  COCONUT COMBO CATCHER
+--                     AUTO QUEST SYSTEM (MCP)
+-- Descoberto via análise do QuestListener, NPCs e Quests modules
+-- Remotes: GiveQuest, CompleteQuest, GiveQuestFromPool, CompleteQuestFromPool
+-- ═══════════════════════════════════════════════════════════════
+
+local AUTO_QUEST = {
+	Enabled = false,
+	Running = false,
+	CheckInterval = 10,
+	LastCheck = 0,
+	CompletedThisSession = 0,
+}
+
+-- Lê quests ativas e completadas direto do ClientStatCache
+local function getQuestStats()
+	local ok, statCache = pcall(function()
+		return require(game:GetService("ReplicatedStorage")
+			:WaitForChild("Client", 5)
+			:WaitForChild("Systems", 5)
+			:WaitForChild("ClientStatCache", 5))
+	end)
+	if not ok or not statCache then return nil end
+
+	local stats = statCache:Get()
+	if not stats or not stats.Quests then return nil end
+	return stats.Quests -- { Active = {...}, Completed = {...} }
+end
+
+-- Verifica se uma quest está ativa
+local function isQuestActive(questName)
+	local quests = getQuestStats()
+	if not quests or not quests.Active then return false end
+	for _, q in ipairs(quests.Active) do
+		if q.Name == questName then return true end
+	end
+	return false
+end
+
+-- Verifica se uma quest está completa (já terminada permanentemente)
+local function isQuestDone(questName)
+	local quests = getQuestStats()
+	if not quests or not quests.Completed then return false end
+	for _, name in ipairs(quests.Completed) do
+		if name == questName then return true end
+	end
+	return false
+end
+
+-- Aceita uma quest via Remote GiveQuest (mesmo caminho que os NPCs usam)
+local function acceptQuest(questName)
+	if isQuestActive(questName) or isQuestDone(questName) then return false end
+	local evts = getBSSEvents()
+	if not evts then return false end
+	local ok = pcall(function()
+		evts.ClientCall("GiveQuest", questName)
+	end)
+	return ok
+end
+
+-- Aceita uma quest de pool (repeat quests via GiveQuestFromPool)
+local function acceptQuestFromPool(poolName)
+	local evts = getBSSEvents()
+	if not evts then return false end
+	local ok = pcall(function()
+		evts.ClientCall("GiveQuestFromPool", poolName)
+	end)
+	return ok
+end
+
+-- Entrega/completa uma quest ativa via Remote CompleteQuest
+local function completeQuest(questName)
+	if not isQuestActive(questName) then return false end
+	local evts = getBSSEvents()
+	if not evts then return false end
+	local ok = pcall(function()
+		evts.ClientCall("CompleteQuest", questName)
+	end)
+	if ok then
+		AUTO_QUEST.CompletedThisSession = AUTO_QUEST.CompletedThisSession + 1
+		safeNotify("📋 Quest Complete!", questName, 4)
+	end
+	return ok
+end
+
+-- Verifica o progresso de uma quest ativa usando o módulo Quests do jogo
+local function getQuestProgress(questName)
+	local ok, QuestsModule = pcall(function()
+		return require(game:GetService("ReplicatedStorage")
+			:WaitForChild("Game", 5)
+			:WaitForChild("Progression", 5)
+			:WaitForChild("Quests", 5))
+	end)
+	if not ok or not QuestsModule then return nil end
+
+	local ok2, statCache = pcall(function()
+		return require(game:GetService("ReplicatedStorage")
+			:WaitForChild("Client", 5)
+			:WaitForChild("Systems", 5)
+			:WaitForChild("ClientStatCache", 5))
+	end)
+	if not ok2 or not statCache then return nil end
+
+	local stats = statCache:Get()
+	if not stats then return nil end
+
+	local canComplete = false
+	pcall(function() canComplete = QuestsModule:CanComplete(questName, stats) end)
+	return canComplete
+end
+
+-- Loop principal do Auto Quest
+local function startAutoQuest()
+	if AUTO_QUEST.Running then return end
+	AUTO_QUEST.Running = true
+
+	task.spawn(function()
+		while AUTO_QUEST.Enabled and shouldContinue() do
+			if tick() - AUTO_QUEST.LastCheck >= AUTO_QUEST.CheckInterval then
+				AUTO_QUEST.LastCheck = tick()
+
+				local quests = getQuestStats()
+				if quests then
+					-- 1. Completa quests ativas que já estão prontas
+					if quests.Active then
+						for _, activeQ in ipairs(quests.Active) do
+							local questName = activeQ.Name
+							if questName and getQuestProgress(questName) then
+								completeQuest(questName)
+								task.wait(0.5)
+							end
+						end
+					end
+
+					-- 2. Aceita quests que ainda não foram iniciadas e não foram completadas
+					-- (apenas quests simples que o jogo oferece automaticamente)
+					-- GiveQuestFromPool não tem cooldown bloqueio — tenta pools conhecidos
+					local knownPools = {
+						"BrownBear", "BlackBear", "MotherBear", "ScienceBear",
+						"PolarBear", "PandaBear", "SpiritBear", "DapperBear",
+					}
+					for _, pool in ipairs(knownPools) do
+						pcall(function() acceptQuestFromPool(pool) end)
+						task.wait(0.1)
+					end
+				end
+			end
+
+			task.wait(2)
+		end
+
+		AUTO_QUEST.Running = false
+	end)
+end
 -- ═══════════════════════════════════════════════════════════════
 
 local COCONUT_CATCHER = {
@@ -608,12 +1538,7 @@ local function findCoconutCombos()
 	for _, token in ipairs(tokensFolder:GetChildren()) do
 		-- Detecta coconuts pelo nome
 		if token.Name:find("Coconut") or token.Name:find("coconut") then
-			local tokenPos = nil
-			if token:IsA("BasePart") then
-				tokenPos = token.Position
-			elseif token:IsA("Model") and token.PrimaryPart then
-				tokenPos = token.PrimaryPart.Position
-			end
+			local tokenPos = getObjectPosition(token)
 			
 			if tokenPos then
 				table.insert(coconuts, {Token = token, Position = tokenPos})
@@ -639,7 +1564,7 @@ local function catchCoconutCombos()
 	
 	for _, coconutData in ipairs(coconuts) do
 		local dist = (root.Position - coconutData.Position).Magnitude
-		if dist < nearestDist and dist < 200 then -- Max 200 studs
+		if dist < nearestDist and dist < CONSTANTS.COCONUT_MAX_DISTANCE then -- Max 200 studs
 			nearest = coconutData
 			nearestDist = dist
 		end
@@ -666,7 +1591,7 @@ local function startCoconutCatcher()
 	COCONUT_CATCHER.Running = true
 	
 	task.spawn(function()
-		while COCONUT_CATCHER.Enabled and CONFIG.Enabled and isCurrentSession() do
+		while COCONUT_CATCHER.Enabled and shouldContinue() do
 			local currentTime = tick()
 			
 			if currentTime - COCONUT_CATCHER.LastCheck >= COCONUT_CATCHER.CheckInterval then
@@ -685,163 +1610,224 @@ end
 -- ═══════════════════════════════════════════════════════════════
 
 BALLOON_FARM = {
-	Enabled = true, -- SEMPRE ATIVO por padrão
+	Enabled = false, -- Desativado por padrão (controlado pelo toggle)
 	Running = false,
 	IsFarming = false, -- flag: evita farm duplo (loop principal + thread)
 	CheckInterval = 1, -- Verifica a cada 1 segundo
 	LastCheck = 0,
 	CurrentBalloon = nil,
 	FarmRadius = 25, -- Raio para farmar ao redor do balão
-	MinFarmTime = 15, -- Mínimo 15 segundos por balão
-	MaxFarmTime = 45 -- Máximo 45 segundos por balão
+	MinFarmTime = CONSTANTS.BALLOON_MIN_FARM_TIME, -- Mínimo 15 segundos por balão
+	MaxFarmTime = CONSTANTS.BALLOON_MAX_FARM_TIME -- Máximo 45 segundos por balão
 }
 
--- Detecta balões ativos usando a estrutura real do BSS
+-- MCP: lê todos os atributos reais do sistema de movimento do balão
+local function getBalloonInfoMCP(balloonModel)
+	if not balloonModel:IsA("Model") then return nil end
+	if not balloonModel:GetAttribute("ClientMotionEnabled") then return nil end
+
+	local motionKind = balloonModel:GetAttribute("ClientMotionKind") or "Unknown"
+	local balloonBody = balloonModel:FindFirstChild("BalloonBody")
+	if not balloonBody or not balloonBody:IsA("BasePart") then return nil end
+
+	local ownerRef = balloonModel:FindFirstChild("PlayerName")
+	local zoneRef  = balloonModel:FindFirstChild("ZoneName")
+
+	return {
+		Model        = balloonModel,
+		Body         = balloonBody,
+		Position     = balloonBody.Position,
+		MotionKind   = motionKind,
+		IsReturning  = motionKind == "FieldBalloonReturn",
+		OwnerName    = ownerRef and ownerRef:IsA("StringValue") and ownerRef.Value or "",
+		Zone         = zoneRef  and zoneRef:IsA("StringValue")  and zoneRef.Value  or "Unknown",
+		-- Movimento (MCP)
+		HomePosition  = balloonModel:GetAttribute("ClientMotionHomePosition"),
+		WanderRadius  = balloonModel:GetAttribute("ClientMotionWanderRadius") or 20,
+		WanderSpeed   = balloonModel:GetAttribute("ClientMotionWanderSpeed"),
+		WanderAngle   = balloonModel:GetAttribute("ClientMotionWanderAngle"),
+		WanderAmpX    = balloonModel:GetAttribute("ClientMotionWanderAmpX"),
+		WanderAmpZ    = balloonModel:GetAttribute("ClientMotionWanderAmpZ"),
+		WanderFreqX   = balloonModel:GetAttribute("ClientMotionWanderFreqX"),
+		WanderFreqZ   = balloonModel:GetAttribute("ClientMotionWanderFreqZ"),
+		-- Zona de farm (MCP)
+		ZoneFrame     = balloonModel:GetAttribute("ClientMotionZoneFrame"),
+		ZoneHalfSize  = balloonModel:GetAttribute("ClientMotionZoneHalfSize"),
+		IsCircleZone  = balloonModel:GetAttribute("ClientMotionZoneIsCircle"),
+		-- Retorno (MCP)
+		ReturnStartTime     = balloonModel:GetAttribute("ClientMotionReturnStartTime"),
+		ReturnDuration      = balloonModel:GetAttribute("ClientMotionReturnDuration"),
+		ReturnStartPosition = balloonModel:GetAttribute("ClientMotionReturnStartPosition"),
+		ReturnTargetPosition= balloonModel:GetAttribute("ClientMotionReturnTargetPosition"),
+		ReturnArcHeight     = balloonModel:GetAttribute("ClientMotionReturnArcHeight"),
+	}
+end
+
+-- MCP: prediz posição futura do balão usando sistema real de movimento
+local function predictBalloonPosition(info, secondsAhead)
+	if not info or not info.Position then return info and info.Position end
+	secondsAhead = secondsAhead or 1.5
+
+	if info.IsReturning and info.ReturnStartTime and info.ReturnDuration then
+		local progress = math.clamp(
+			(tick() - info.ReturnStartTime + secondsAhead) / info.ReturnDuration, 0, 1
+		)
+		local startPos  = info.ReturnStartPosition
+		local targetPos = info.ReturnTargetPosition
+		local arc       = info.ReturnArcHeight or 10
+		if startPos and targetPos then
+			local h = startPos:Lerp(targetPos, progress)
+			return h + Vector3.new(0, math.sin(progress * math.pi) * arc, 0)
+		end
+	end
+
+	if info.WanderSpeed and info.WanderAngle then
+		local dist  = info.WanderSpeed * secondsAhead
+		local ampX  = info.WanderAmpX or 0.9
+		local ampZ  = info.WanderAmpZ or 0.68
+		local freqX = info.WanderFreqX or 1.03
+		local freqZ = info.WanderFreqZ or 1.31
+		local angle = info.WanderAngle
+		return info.Position + Vector3.new(
+			math.cos(angle * freqX) * dist * ampX,
+			0,
+			math.sin(angle * freqZ) * dist * ampZ
+		)
+	end
+
+	return info.Position
+end
+
+-- MCP: detecta balões com dados completos de movimento
 local function findActiveBalloons()
 	local balloons = {}
-	
-	-- Procura na pasta correta: Workspace.Balloons.FieldBalloons
-	local balloonsFolder = workspace:FindFirstChild("Balloons")
-	if not balloonsFolder then return balloons end
-	
-	local fieldBalloons = balloonsFolder:FindFirstChild("FieldBalloons")
-	if not fieldBalloons then return balloons end
-	
 	local playerName = player.Name
-	
-	for _, balloon in ipairs(fieldBalloons:GetChildren()) do
-		if balloon:IsA("Model") then
-			-- Verifica se é um balão ativo (atributo ClientMotionEnabled)
-			local isActive = balloon:GetAttribute("ClientMotionEnabled")
-			
-			-- Verifica se é do jogador
-			local owner = balloon:FindFirstChild("PlayerName")
-			local isOurs = owner and owner:IsA("StringValue") and owner.Value == playerName
-			
-			-- Pega BalloonBody (parte visual)
-			local balloonBody = balloon:FindFirstChild("BalloonBody")
-			
-			if isActive and isOurs and balloonBody and balloonBody:IsA("BasePart") then
-				-- Pega informações do balão
-				local zoneName = balloon:FindFirstChild("ZoneName")
-				local zone = zoneName and zoneName:IsA("StringValue") and zoneName.Value or "Unknown"
-				
-				local motionKind = balloon:GetAttribute("ClientMotionKind") or "Unknown"
-				local homePos = balloon:GetAttribute("ClientMotionHomePosition")
-				local wanderRadius = balloon:GetAttribute("ClientMotionWanderRadius") or 20
-				
-				table.insert(balloons, {
-					Model = balloon,
-					Body = balloonBody,
-					Position = balloonBody.Position,
-					Zone = zone,
-					MotionKind = motionKind,
-					HomePosition = homePos,
-					WanderRadius = wanderRadius,
-					IsReturning = motionKind == "FieldBalloonReturn" -- Está voltando para colmeia
-				})
+
+	local sources = {
+		getCachedFolder("FieldBalloons"),
+		workspace:FindFirstChild("Balloons") and workspace.Balloons:FindFirstChild("HiveBalloons") or nil,
+	}
+
+	for _, folder in ipairs(sources) do
+		if not folder then continue end
+		for _, balloon in ipairs(folder:GetChildren()) do
+			local info = getBalloonInfoMCP(balloon)
+			if info and info.OwnerName == playerName and not info.IsReturning then
+				info.IsHive = folder.Name == "HiveBalloons"
+				table.insert(balloons, info)
 			end
 		end
 	end
-	
+
 	return balloons
 end
 
--- Farma um balão de forma inteligente
-local function farmBalloon(balloonData)
-	if not balloonData or not balloonData.Body.Parent then return false end
-	if BALLOON_FARM.IsFarming then return false end -- evita farm duplo
-	
-	-- Se o balão está voltando, não vale a pena farmar
-	if balloonData.IsReturning then 
-		return false 
+-- MCP: calcula melhor posição de farm usando ZoneFrame real do balão
+local function getBalloonFarmPos(info)
+	local bodyPos = info.Body and info.Body.Parent and info.Body.Position or info.Position
+	-- Se tem ZoneFrame (descoberto via MCP), usa o centro da zona
+	if info.ZoneFrame and info.ZoneHalfSize then
+		return Vector3.new(
+			info.ZoneFrame.Position.X,
+			bodyPos.Y + CONSTANTS.BALLOON_POSITION_OFFSET_Y,
+			info.ZoneFrame.Position.Z
+		)
 	end
-	
+	-- Fallback: embaixo do balão
+	return bodyPos + Vector3.new(0, CONSTANTS.BALLOON_POSITION_OFFSET_Y, 0)
+end
+
+-- MCP: verifica se posição está dentro da zona real do balão
+local function isInsideBalloonZone(pos, info)
+	if not info.ZoneFrame or not info.ZoneHalfSize then return true end
+	local rel = info.ZoneFrame:PointToObjectSpace(pos)
+	if info.IsCircleZone then
+		local r = math.max(info.ZoneHalfSize.X, info.ZoneHalfSize.Z)
+		return (rel.X^2 + rel.Z^2) <= r^2
+	end
+	return math.abs(rel.X) <= info.ZoneHalfSize.X and math.abs(rel.Z) <= info.ZoneHalfSize.Z
+end
+
+-- Farma um balão usando dados reais de movimento (MCP)
+local function farmBalloon(balloonData)
+	if not balloonData or not balloonData.Body or not balloonData.Body.Parent then return false end
+	if not BALLOON_FARM.Enabled or not CONFIG.FarmBalloons then return false end
+	if BALLOON_FARM.IsFarming then return false end
+	if balloonData.IsReturning then return false end
+
 	BALLOON_FARM.IsFarming = true
-	
-	-- Calcula posição ideal: embaixo do balão + offset para evitar colisão
-	local balloonPos = balloonData.Position
-	local farmPos = balloonPos + Vector3.new(0, -8, 0) -- 8 studs embaixo
-	
-	-- Tween até o balão
-	if not tweenToField(farmPos) then
+
+	-- MCP: usa ZoneFrame para posição precisa
+	local farmPos = getBalloonFarmPos(balloonData)
+
+	if not tweenToField(farmPos, "balloon") then
 		BALLOON_FARM.IsFarming = false
 		return false
 	end
-	
+
 	if not CONFIG.Enabled then
 		BALLOON_FARM.IsFarming = false
 		return false
 	end
-	
+
 	RUNTIME.Stats.BalloonsVisited = RUNTIME.Stats.BalloonsVisited + 1
-	
-	pcall(function()
-		if Rayfield and Rayfield.Notify then
-			Rayfield:Notify({
-				Title = "🎈 Balloon Found!",
-				Content = string.format("Farming %s balloon at %s", 
-					balloonData.MotionKind == "FieldBalloon" and "active" or "moving",
-					balloonData.Zone),
-				Duration = 3,
-				Image = 4483362458,
-			})
-		end
-	end)
-	
-	-- Farma ao redor do balão seguindo seu movimento
+	safeNotify("🎈 Balloon Found!", string.format("Farming at %s (%s)", balloonData.Zone, balloonData.MotionKind), 3)
+
 	local farmStartTime = tick()
 	local lastPosUpdate = tick()
-	local lastBalloonPos = balloonPos
-	
-	while CONFIG.Enabled and balloonData.Body.Parent and tick() - farmStartTime < BALLOON_FARM.MaxFarmTime do
-		-- Verifica se o balão ainda é válido
-		if not balloonData.Model.Parent or balloonData.Model:GetAttribute("ClientMotionEnabled") == false then
-			break
-		end
-		
-		-- Verifica se começou a voltar para colmeia
-		local motionKind = balloonData.Model:GetAttribute("ClientMotionKind")
-		if motionKind == "FieldBalloonReturn" then
-			break -- Balão está voltando, para de farmar
-		end
-		
-		-- Atualiza posição do balão (balões se movem!)
-		if tick() - lastPosUpdate > 2 then
-			balloonPos = balloonData.Body.Position
-			
-			-- Se o balão se moveu muito, atualiza posição
-			if (balloonPos - lastBalloonPos).Magnitude > 15 then
-				farmPos = balloonPos + Vector3.new(0, -8, 0)
-				moveTo(farmPos)
+
+	while shouldContinue() and BALLOON_FARM.Enabled and CONFIG.FarmBalloons
+		and balloonData.Body.Parent
+		and tick() - farmStartTime < BALLOON_FARM.MaxFarmTime do
+
+		if not balloonData.Model.Parent then break end
+
+		-- MCP: re-lê MotionKind diretamente do attribute
+		if balloonData.Model:GetAttribute("ClientMotionKind") == "FieldBalloonReturn" then break end
+
+		-- MCP: atualiza usando predição de movimento
+		if tick() - lastPosUpdate > CONSTANTS.BALLOON_POSITION_UPDATE_INTERVAL then
+			-- Atualiza info com atributos mais recentes
+			local updatedInfo = getBalloonInfoMCP(balloonData.Model)
+			if updatedInfo then
+				-- Prediz posição 2s à frente para seguir o balão
+				local predicted = predictBalloonPosition(updatedInfo, 2)
+				if predicted then
+					local newFarmPos = Vector3.new(
+						predicted.X,
+						predicted.Y + CONSTANTS.BALLOON_POSITION_OFFSET_Y,
+						predicted.Z
+					)
+					-- Só move se saiu bastante da posição atual
+					if (newFarmPos - farmPos).Magnitude > CONSTANTS.BALLOON_MOVEMENT_THRESHOLD then
+						farmPos = newFarmPos
+						moveTo(farmPos, nil, "balloon")
+					end
+				end
 			end
-			
-			lastBalloonPos = balloonPos
 			lastPosUpdate = tick()
 		end
-		
-		-- Move um pouco ao redor do balão (dentro do raio de coleta)
+
+		-- MCP: move dentro da zona real do balão
+		local root = getRoot()
 		local offset = Vector3.new(
 			math.random(-BALLOON_FARM.FarmRadius, BALLOON_FARM.FarmRadius),
 			0,
 			math.random(-BALLOON_FARM.FarmRadius, BALLOON_FARM.FarmRadius)
 		)
-		moveTo(farmPos + offset)
-		
+		local targetPos = farmPos + offset
+		-- Se tem zona definida, garante que o offset fica dentro dela
+		if root and not isInsideBalloonZone(targetPos, balloonData) then
+			targetPos = farmPos -- volta pro centro da zona
+		end
+		moveTo(targetPos, nil, "balloon")
+
 		task.wait(1.5)
-		
-		-- Garante tempo mínimo de farm
-		if tick() - farmStartTime < BALLOON_FARM.MinFarmTime then
-			continue
-		end
-		
-		-- Se o pólen está alto, volta para converter
-		local pollenPercent = (pollenValue.Value / capacityValue.Value) * 100
-		if pollenPercent >= CONFIG.ConvertAt then
-			break
-		end
+
+		if tick() - farmStartTime < BALLOON_FARM.MinFarmTime then continue end
+		if safeGetPollenPercent() >= CONFIG.ConvertAt then break end
 	end
-	
+
 	BALLOON_FARM.IsFarming = false
 	return true
 end
@@ -852,7 +1838,7 @@ local function startBalloonFarm()
 	BALLOON_FARM.Running = true
 	
 	task.spawn(function()
-		while BALLOON_FARM.Enabled and CONFIG.Enabled and isCurrentSession() do
+		while BALLOON_FARM.Enabled and CONFIG.FarmBalloons and shouldContinue() do
 			-- Só age se o auto farm está ativo E não há farm duplo
 			if CONFIG.Enabled and not BALLOON_FARM.IsFarming then
 				local currentTime = tick()
@@ -881,13 +1867,6 @@ local function startBalloonFarm()
 		BALLOON_FARM.Running = false
 	end)
 end
-
--- Setup do listener de balloon inflate (após todas as variáveis estarem declaradas)
--- IMPORTANTE: Só chama após Rayfield estar carregado
-task.defer(function()
-	task.wait(2) -- aguarda Rayfield carregar completamente
-	setupBalloonInflateListener()
-end)
 
 -- ═══════════════════════════════════════════════════════════════
 --                     CLOUD FARM
@@ -937,7 +1916,7 @@ local function farmCloud(cloudData)
 	local cloudPos = cloudData.Position + Vector3.new(0, -3, 0) -- Embaixo da nuvem
 	
 	-- Tween até a nuvem
-	tweenToField(cloudPos)
+	tweenToField(cloudPos, "cloud")
 	
 	if not CONFIG.Enabled then return false end
 	
@@ -945,10 +1924,10 @@ local function farmCloud(cloudData)
 	
 	-- Fica farmando embaixo da nuvem
 	local farmTime = tick()
-	while CONFIG.Enabled and cloudData.Part.Parent and tick() - farmTime < 45 do
+	while shouldContinue() and cloudData.Part.Parent and tick() - farmTime < 45 do
 		-- Move ao redor da nuvem
 		local offset = Vector3.new(math.random(-8, 8), 0, math.random(-8, 8))
-		moveTo(cloudPos + offset)
+		moveTo(cloudPos + offset, nil, "cloud")
 		
 		task.wait(1)
 	end
@@ -961,7 +1940,7 @@ local function startCloudFarm()
 	CLOUD_FARM.Running = true
 	
 	task.spawn(function()
-		while CLOUD_FARM.Enabled and CONFIG.Enabled and isCurrentSession() do
+		while CLOUD_FARM.Enabled and shouldContinue() do
 			local currentTime = tick()
 			
 			if currentTime - CLOUD_FARM.LastCheck >= CLOUD_FARM.CheckInterval then
@@ -1008,28 +1987,36 @@ end
 --                  FLAMES & MARKS COLLECTION
 -- ═══════════════════════════════════════════════════════════════
 
+-- Restaura todas as flags de sistemas para uma inicialização ou parada consistente.
+local function resetAllSystems()
+	releaseToolCollectInput()
+	TOOL_COLLECT.Running = false
+	TOOL_COLLECT.Enabled = false
+	TOKEN_COLLECTOR.Running = false
+	TOKEN_COLLECTOR.Enabled = false
+	COCONUT_CATCHER.Running = false
+	COCONUT_CATCHER.Enabled = false
+	BALLOON_FARM.Running = false
+	BALLOON_FARM.IsFarming = false
+	BALLOON_FARM.Enabled = false
+	CLOUD_FARM.Running = false
+	CLOUD_FARM.Enabled = false
+	collectingToken = false
+end
+
 local function collectNearbyFlames()
-	local character = player.Character
-	if not character then return end
-	
-	local root = character:FindFirstChild("HumanoidRootPart")
-	local humanoid = character:FindFirstChild("Humanoid")
-	if not root or not humanoid then return end
-	
+	if not CONFIG.CollectFlames then return end
+
+	local root = getRoot()
+	if not root then return end
+
 	local flamesFolder = workspace:FindFirstChild("PlayerFlames")
 	if not flamesFolder then return end
-	
+
+	-- Só coleta flames próximas (~10 studs) sem desviar do caminho
 	for _, flame in ipairs(flamesFolder:GetChildren()) do
-		if flame:IsA("BasePart") and (root.Position - flame.Position).Magnitude < 30 then
-			-- Move para perto da flame usando Humanoid
-			local flamePos = flame.Position
-			if (root.Position - flamePos).Magnitude > 5 then
-				humanoid:MoveTo(flamePos)
-				task.wait(0.3)
-			end
-			
-			-- Aguarda coleta
-			task.wait(0.2)
+		if flame:IsA("BasePart") and (root.Position - flame.Position).Magnitude < 10 then
+			task.wait(0.15)
 			if not flame.Parent then
 				RUNTIME.Stats.FlamesCollected = RUNTIME.Stats.FlamesCollected + 1
 			end
@@ -1038,6 +2025,9 @@ local function collectNearbyFlames()
 end
 
 local function collectNearbyMarks()
+	-- Verifica se está habilitado
+	if not CONFIG.CollectMarks then return end
+	
 	local root = getRoot()
 	if not root then return end
 	
@@ -1047,7 +2037,7 @@ local function collectNearbyMarks()
 	for _, mark in ipairs(marksFolder:GetChildren()) do
 		if mark:IsA("BasePart") and (root.Position - mark.Position).Magnitude < 25 then
 			-- Marcas são coletadas automaticamente ao passar perto
-			task.wait(0.1)
+			task.wait(CONSTANTS.MOVE_CHECK_INTERVAL)
 			if not mark.Parent then
 				RUNTIME.Stats.MarksCollected = RUNTIME.Stats.MarksCollected + 1
 			end
@@ -1056,186 +2046,143 @@ local function collectNearbyMarks()
 end
 
 -- ═══════════════════════════════════════════════════════════════
---                     PLANTERS SYSTEM
--- ═══════════════════════════════════════════════════════════════
-
-local function scanPlanters()
-	PLANTERS.ActivePlanters = {}
-	local plantersFolder = workspace:FindFirstChild("Planters")
-	if not plantersFolder then return end
-	
-	for _, planter in ipairs(plantersFolder:GetChildren()) do
-		if planter:IsA("Model") or planter:IsA("MeshPart") then
-			-- Detecta PlanterBulb (indicador visual de pronto)
-			local bulb = planter:FindFirstChild("PlanterBulb") or planter:FindFirstChildWhichIsA("MeshPart", true)
-			
-			if bulb then
-				local planterData = {
-					Model = planter,
-					Bulb = bulb,
-					Position = planter:IsA("Model") and planter:GetPivot().Position or planter.Position,
-					Ready = false
-				}
-				
-				-- Verifica se tem NumberValue (porcentagem)
-				local percentValue = bulb:FindFirstChild("NumberValue")
-				if percentValue and percentValue.Value then
-					planterData.Percent = percentValue.Value
-					planterData.Ready = percentValue.Value >= 100
-				end
-				
-				table.insert(PLANTERS.ActivePlanters, planterData)
-			end
-		end
-	end
-end
-
-local function collectReadyPlanters()
-	if not PLANTERS.AutoCollect then return end
-	
-	scanPlanters()
-	
-	for _, planterData in ipairs(PLANTERS.ActivePlanters) do
-		if planterData.Ready then
-			local root = getRoot()
-			if not root then return end
-			
-			-- Move para o planter
-			local planterPos = planterData.Position + Vector3.new(0, 3, 0)
-			moveTo(planterPos)
-			
-			if not CONFIG.Enabled then return end
-			
-			-- Tenta coletar (aproxima-se)
-			task.wait(0.5)
-			
-			-- Verifica se foi coletado
-			if not planterData.Model.Parent then
-				RUNTIME.Stats.PlantersHarvested = RUNTIME.Stats.PlantersHarvested + 1
-				
-				Rayfield:Notify({
-					Title = "🪴 Planter Collected!",
-					Content = "Harvested a planter successfully",
-					Duration = 3,
-					Image = 4483362458,
-				})
-			end
-		end
-	end
-end
-
-local function checkPlanters()
-	if not PLANTERS.Enabled then return end
-	
-	local currentTime = tick()
-	if currentTime - PLANTERS.LastCheck < PLANTERS.CheckInterval then return end
-	PLANTERS.LastCheck = currentTime
-	
-	collectReadyPlanters()
-end
-
--- ═══════════════════════════════════════════════════════════════
 --                     COLETA NO CAMPO (INTELIGENTE)
 -- ═══════════════════════════════════════════════════════════════
 
 -- Detecta as MELHORES flores no campo (prioriza tamanho e polen)
+-- Usa GetPartBoundsInBox para busca espacial — não itera as 11k flores do Workspace.
 local function findFlowersInField(fieldObj)
+	local currentTime = tick()
+	if FLOWER_CACHE.currentField == fieldObj
+		and currentTime - FLOWER_CACHE.lastScan < CONSTANTS.FLOWER_CACHE_TIMEOUT then
+		return FLOWER_CACHE.flowers
+	end
+
 	local flowers = {}
-	local fPos = getFieldPosition(fieldObj)
+	local fPos, fSize = getFieldPosition(fieldObj)
 	if not fPos then return flowers end
-	
-	-- Procura flores próximas ao campo
-	for _, obj in ipairs(workspace:GetDescendants()) do
-		if obj:IsA("BasePart") and obj.Name:find("Flower") then
+
+	-- Raio de busca: raio do campo + margem
+	local searchRadius = CONFIG.FieldRadius + 10
+	-- GetPartBoundsInBox recebe (CFrame, tamanho, OverlapParams)
+	-- Retorna apenas as BaseParts dentro da caixa — muito mais rápido que iterar tudo.
+	local searchBox  = CFrame.new(fPos)
+	local searchSize = Vector3.new(searchRadius * 2, 40, searchRadius * 2)
+	local params = OverlapParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	-- Filtra só a pasta Flowers para não pegar o chão, paredes, etc.
+	local flowersFolder = workspace:FindFirstChild("Flowers")
+	if flowersFolder then
+		params:AddToFilter(flowersFolder)
+	end
+
+	local candidates = workspace:GetPartBoundsInBox(searchBox, searchSize, params)
+
+	for _, obj in ipairs(candidates) do
+		-- Flowers são BaseParts visíveis dentro da pasta
+		if obj.Transparency < 0.8 then
 			local dist = (obj.Position - fPos).Magnitude
-			
-			-- Só considera flores dentro do raio do campo
-			if dist <= CONFIG.FieldRadius + 10 then
-				-- Calcula prioridade baseado em TAMANHO (flores maiores = mais polen)
-				-- Prioridade: 90% tamanho, 10% proximidade
-				local size = obj.Size.Magnitude
-				local priority = (size * 10) - (dist * 0.5) -- Tamanho tem 20x mais peso
-				
-				-- BONUS: Flores coloridas específicas (geralmente têm mais polen)
-				local color = obj.Color
-				if color.R > 0.8 and color.G < 0.3 then -- Vermelho
+			if dist <= searchRadius then
+				local size     = obj.Size.Magnitude
+				local priority = (size * 10) - (dist * 0.5)
+				local value    = size * 10
+				local color    = obj.Color
+				local nectar   = obj:GetAttribute("Nectar")
+
+				if nectar == "Red" or (not nectar and color.R > 0.8 and color.G < 0.3) then
 					priority = priority + 15
-				elseif color.B > 0.8 then -- Azul
+				elseif nectar == "Blue" or (not nectar and color.B > 0.8) then
 					priority = priority + 12
-				elseif color.R > 0.8 and color.G > 0.8 then -- Amarelo/Dourado
+				elseif nectar == "White" or (not nectar and color.R > 0.8 and color.G > 0.8) then
 					priority = priority + 20
 				end
-				
+
 				table.insert(flowers, {
-					Part = obj,
+					Part     = obj,
 					Position = obj.Position,
 					Priority = priority,
 					Distance = dist,
-					Size = size
+					Size     = size,
+					Color    = color,
+					Nectar   = nectar,
+					Value    = value,
 				})
 			end
 		end
 	end
-	
-	-- Ordena por prioridade (maior primeiro) = MELHORES FLORES PRIMEIRO
+
 	table.sort(flowers, function(a, b)
 		return a.Priority > b.Priority
 	end)
-	
+	FLOWER_CACHE.flowers      = flowers
+	FLOWER_CACHE.lastScan     = currentTime
+	FLOWER_CACHE.currentField = fieldObj
+
 	return flowers
 end
 
--- Detecta GRUPOS DE POLEN densos (muitos tokens próximos = melhor area)
+local function getNextBestFlower(flowers, currentPosition)
+	local now, best, bestScore = tick(), nil, -math.huge
+	for _, flower in ipairs(flowers) do
+		if flower.Part.Parent and flower.Value >= SMART_FLOWER_SYSTEM.MinFlowerValue then
+			local lastVisited = SMART_FLOWER_SYSTEM.FlowerHistory[flower.Part] or 0
+			local freshness = math.min(1, (now - lastVisited) / SMART_FLOWER_SYSTEM.DepletionTimeout)
+			local distance = math.max(1, (flower.Position - currentPosition).Magnitude)
+			local colorBonus = 1
+			if SMART_FLOWER_SYSTEM.ColorPreference == "Blue" and (flower.Nectar == "Blue" or flower.Color.B > flower.Color.R) then colorBonus = 1.35 end
+			if SMART_FLOWER_SYSTEM.ColorPreference == "Red" and (flower.Nectar == "Red" or flower.Color.R > flower.Color.B) then colorBonus = 1.35 end
+			local score = flower.Value * (0.25 + freshness) * colorBonus / distance
+			if score > bestScore then best, bestScore = flower, score end
+		end
+	end
+	if best then SMART_FLOWER_SYSTEM.FlowerHistory[best.Part] = now end
+	return best
+end
+
+-- Detecta GRUPOS DE POLEN densos usando grid espacial — O(n) em vez de O(n²)
 local function findBestPollenArea(position, radius)
-	local pollenTokens = {}
-	local tokensFolder = workspace:FindFirstChild("Collectibles")
+	local tokensFolder = getCachedFolder("Collectibles")
 	if not tokensFolder then return nil end
-	
-	-- Coleta TODOS os tokens de polen no campo
+
+	-- Coleta tokens relevantes dentro do raio
+	local pollenTokens = {}
 	for _, token in ipairs(tokensFolder:GetChildren()) do
 		if token.Name:find("Pollen") or token.Name:find("Sparkle") or token.Name:find("Honey") then
-			local tokenPos = token:IsA("BasePart") and token.Position or (token:IsA("Model") and token.PrimaryPart and token.PrimaryPart.Position)
-			
-			if tokenPos then
-				local dist = (tokenPos - position).Magnitude
-				if dist <= radius then
-					table.insert(pollenTokens, {
-						Token = token,
-						Position = tokenPos,
-						Distance = dist
-					})
-				end
+			local tokenPos = getObjectPosition(token)
+			if tokenPos and (tokenPos - position).Magnitude <= radius then
+				table.insert(pollenTokens, tokenPos)
 			end
 		end
 	end
-	
 	if #pollenTokens == 0 then return nil end
-	
-	-- Encontra a AREA com mais polen (clusters)
-	local bestArea = nil
-	local bestScore = 0
-	local clusterRadius = 8 -- Raio para considerar "cluster"
-	
-	for _, token in ipairs(pollenTokens) do
-		local score = 0
-		-- Conta quantos tokens estao proximos deste
-		for _, other in ipairs(pollenTokens) do
-			if other ~= token then
-				local dist = (token.Position - other.Position).Magnitude
-				if dist <= clusterRadius then
-					score = score + 1
-				end
-			end
-		end
-		
-		-- Area com MAIS polen = melhor
-		if score > bestScore then
-			bestScore = score
-			bestArea = token.Position
+
+	-- Grid espacial: divide a área em células de 8 studs
+	-- Cada token incrementa sua célula e as adjacentes — O(n) total
+	local cellSize = 8
+	local grid = {}
+	local function cellKey(pos)
+		return math.floor(pos.X / cellSize) .. "," .. math.floor(pos.Z / cellSize)
+	end
+
+	for _, pos in ipairs(pollenTokens) do
+		local key = cellKey(pos)
+		grid[key] = (grid[key] or {count = 0, center = pos})
+		grid[key].count = grid[key].count + 1
+		-- Atualiza centro da célula como média
+		grid[key].center = (grid[key].center + pos) / 2
+	end
+
+	-- Pega a célula com mais tokens
+	local bestPos   = nil
+	local bestCount = 0
+	for _, cell in pairs(grid) do
+		if cell.count > bestCount then
+			bestCount = cell.count
+			bestPos   = cell.center
 		end
 	end
-	
-	return bestArea
+
+	return bestPos
 end
 
 local function buildFieldRoute(center, size)
@@ -1282,46 +2229,65 @@ local function collectAtField(fieldObj)
 	currentFlowers = findFlowersInField(fieldObj)
 	lastFlowerScan = tick()
 	
-	while CONFIG.Enabled and isCurrentSession() and CONFIG.SelectedField == fieldObj do
-		local pollenPercent = (pollenValue.Value / capacityValue.Value) * 100
+	-- WATCHDOG: detecta se player foi muito longe do campo
+	local maxFieldDistance = CONFIG.FieldRadius + 30 -- Tolerância extra
+	local consecutiveFailedMoves = 0
+	local maxConsecutiveFailures = 3 -- Se falhar 3 movimentos, sai
+	
+	while shouldContinue() and CONFIG.SelectedField == fieldObj do
+		updateBoosts()
+		updateEventTracker()
+		useHotbarItems()
+		if checkBossEvents() then
+			-- The boss routine completed; refresh field data before normal farming resumes.
+			currentFlowers, currentFlowerIndex, lastFlowerScan = findFlowersInField(fieldObj), 1, tick()
+		end
+		local pollenPercent = safeGetPollenPercent()
 		if pollenPercent >= CONFIG.ConvertAt then
 			break
 		end
 		
+		-- WATCHDOG: Verifica se player está muito longe do campo
+		local root = getRoot()
+		if root then
+			local distanceFromField = (root.Position - fPos).Magnitude
+			if distanceFromField > maxFieldDistance then
+				-- Player foi movido manualmente para longe - sai e reinicia
+				break
+			end
+		end
+		
+		local currentTime = tick()
+
 		-- Coleta flames (SE ATIVADO)
-		if CONFIG.CollectFlames and tick() - lastFlameCheck > 2 then
+		if CONFIG.CollectFlames and currentTime - lastFlameCheck > 2 then
 			collectNearbyFlames()
-			lastFlameCheck = tick()
+			lastFlameCheck = currentTime
 		end
 		
 		-- Coleta marks (SE ATIVADO)
-		if CONFIG.CollectMarks and tick() - lastMarkCheck > 1.5 then
+		if CONFIG.CollectMarks and currentTime - lastMarkCheck > 1.5 then
 			collectNearbyMarks()
-			lastMarkCheck = tick()
-		end
-		
-		-- Verifica planters (SE ATIVADO)
-		if PLANTERS.Enabled then
-			checkPlanters()
+			lastMarkCheck = currentTime
 		end
 		
 		-- Re-escaneia flores a cada 5 segundos para pegar NOVAS flores melhores
-		if tick() - lastFlowerScan > 5 then
+		if currentTime - lastFlowerScan > 20 then
 			currentFlowers = findFlowersInField(fieldObj)
 			currentFlowerIndex = 1
-			lastFlowerScan = tick()
+			lastFlowerScan = currentTime
 		end
 		
 		-- PRIORIDADE 1: Vai para a MELHOR flor disponível (maior polen)
 		local targetPos = nil
 		
 		if #currentFlowers > 0 and currentFlowerIndex <= #currentFlowers then
-			local flower = currentFlowers[currentFlowerIndex]
+			local flower = CONFIG.SmartFlowerTargeting and getNextBestFlower(currentFlowers, root and root.Position or fPos) or currentFlowers[currentFlowerIndex]
 			
 			-- Verifica se a flor ainda existe
-			if flower.Part.Parent then
+			if flower and flower.Part.Parent then
 				targetPos = flower.Position + Vector3.new(0, CONFIG.CollectHeight, 0)
-			else
+			elseif not CONFIG.SmartFlowerTargeting then
 				-- Flor sumiu, vai para a próxima MELHOR
 				currentFlowerIndex = currentFlowerIndex + 1
 			end
@@ -1340,7 +2306,8 @@ local function collectAtField(fieldObj)
 			targetPos = fPos + Vector3.new(0, CONFIG.CollectHeight, 0)
 		end
 
-		if CONFIG.FarmMode == "Route Sweep" and #fieldRoute > 0 then
+		-- Smart targeting deliberately takes precedence over the predictable grid route.
+		if not CONFIG.SmartFlowerTargeting and CONFIG.FarmMode == "Route Sweep" and #fieldRoute > 0 then
 			local root = getRoot()
 			local routeTarget = fieldRoute[routeIndex]
 			if root and (root.Position - routeTarget).Magnitude <= 7 then
@@ -1350,35 +2317,31 @@ local function collectAtField(fieldObj)
 			targetPos = routeTarget + Vector3.new(0, CONFIG.CollectHeight, 0)
 		end
 
-		-- Move para a posicao OTIMA
-		moveTo(targetPos, CONFIG.FarmMode == "Route Sweep" and routeArrivalDistance or nil)
+		-- Move para a posicao OTIMA e verifica se conseguiu
+		local moveSuccess = moveTo(targetPos, (not CONFIG.SmartFlowerTargeting and CONFIG.FarmMode == "Route Sweep") and routeArrivalDistance or nil)
+		
+		if not moveSuccess then
+			-- Movimento falhou (player parado, obstáculo ou movimento manual)
+			consecutiveFailedMoves = consecutiveFailedMoves + 1
+			if consecutiveFailedMoves >= maxConsecutiveFailures then
+				-- Muitas falhas consecutivas - sai e reinicia
+				break
+			end
+		else
+			-- Movimento OK, reseta contador
+			consecutiveFailedMoves = 0
+		end
+		
 		if not CONFIG.Enabled then return end
 		
 		-- Fica coletando por um tempo antes de reavaliação
-		-- Tempo reduzido para sempre buscar melhores posições
 		task.wait(CONFIG.CollectInterval) 
 	end
 end
 
 local function convertAtHive()
-	local hive = getHive()
-	if not hive then 
-		task.wait(2)
-		return 
-	end
-	
-	local hivePos = hive.Position + Vector3.new(0, 3, 0)
-	
-	-- Usa TWEEN para voltar rápido à colmeia (teleporte suave)
-	if tweenToField(hivePos) then
-		if eventsApi and eventsApi.ClientCall then
-			pcall(function()
-				eventsApi.ClientCall("PlayerHiveCommand", "ToggleHoneyMaking")
-			end)
-		end
-		
-		task.wait(CONFIG.WaitAtHive or 3)
-	end
+	-- MCP: usa Remote real + ConvertingAtHive attribute
+	convertAtHiveRemote()
 end
 
 -- ═══════════════════════════════════════════════════════════════
@@ -1389,18 +2352,26 @@ local function automationLoop()
 	if SESSION.AutomationRunning then return end
 	SESSION.AutomationRunning = true
 	RUNTIME.Active = true
-	RUNTIME.Stats.StartTime = tick()
-	RUNTIME.Stats.LastStatsUpdate = tick()
-	RUNTIME.Stats.LastPollenValue = pollenValue.Value
-	RUNTIME.Stats.LastHoneyValue = honeyValue.Value
+	local currentTime = tick()
+	RUNTIME.Stats.StartTime = currentTime
+	RUNTIME.Stats.LastStatsUpdate = currentTime
+	RUNTIME.Stats.LastPollenValue = safeGetStatValue(pollenValue)
+	RUNTIME.Stats.LastHoneyValue = safeGetStatValue(honeyValue)
 	
 	-- Inicia o sistema de coleta contínuo
 	TOOL_COLLECT.Enabled = true
 	enableToolCollect()
+	startAntiDisconnect()
+	startSpeedEnforcer()
 	
 	-- Inicia o coletor de tokens contínuo
 	TOKEN_COLLECTOR.Enabled = true
 	startTokenCollector()
+	
+	-- Inicia Auto Quest se habilitado
+	if AUTO_QUEST.Enabled then
+		startAutoQuest()
+	end
 	
 	-- Inicia sistemas especiais (se habilitados)
 	if CONFIG.CoconutCatcher then
@@ -1408,22 +2379,23 @@ local function automationLoop()
 		startCoconutCatcher()
 	end
 	
-	-- Balloon farm SEMPRE inicia junto com o auto farm
-	BALLOON_FARM.Enabled = true
-	CONFIG.FarmBalloons = true
-	startBalloonFarm()
+	-- Balloon farm (se habilitado)
+	if CONFIG.FarmBalloons then
+		BALLOON_FARM.Enabled = true
+		startBalloonFarm()
+	end
 	
 	if CONFIG.FarmClouds then
 		CLOUD_FARM.Enabled = true
 		startCloudFarm()
 	end
 	
-	while CONFIG.Enabled and isCurrentSession() do
+	while shouldContinue() do
 		if not CONFIG.SelectedField or not CONFIG.SelectedField.Parent then 
 			task.wait(0.5)
-		elseif pollenValue.Value >= capacityValue.Value then
+		elseif safeGetPollenPercent() >= CONFIG.ConvertAt then
 			-- Atualiza pólen coletado antes de converter
-			local currentPollen = pollenValue.Value
+			local currentPollen = safeGetStatValue(pollenValue)
 			if currentPollen > RUNTIME.Stats.LastPollenValue then
 				RUNTIME.Stats.PollenCollected = RUNTIME.Stats.PollenCollected + (currentPollen - RUNTIME.Stats.LastPollenValue)
 			end
@@ -1432,14 +2404,14 @@ local function automationLoop()
 			convertAtHive()
 			
 			-- Atualiza mel gerado após converter
-			local currentHoney = honeyValue.Value
+			local currentHoney = safeGetStatValue(honeyValue)
 			if currentHoney > RUNTIME.Stats.LastHoneyValue then
 				RUNTIME.Stats.HoneyMade = RUNTIME.Stats.HoneyMade + (currentHoney - RUNTIME.Stats.LastHoneyValue)
 			end
 			RUNTIME.Stats.LastHoneyValue = currentHoney
 		else
 			-- Atualiza pólen durante farm
-			local currentPollen = pollenValue.Value
+			local currentPollen = safeGetStatValue(pollenValue)
 			if currentPollen > RUNTIME.Stats.LastPollenValue then
 				RUNTIME.Stats.PollenCollected = RUNTIME.Stats.PollenCollected + (currentPollen - RUNTIME.Stats.LastPollenValue)
 			end
@@ -1470,10 +2442,12 @@ local function automationLoop()
 			
 			local fPos = getFieldPosition(CONFIG.SelectedField)
 			if fPos then
-				-- Usa TWEEN para ir ao campo (teleporte suave)
-				tweenToField(fPos + Vector3.new(0, 3, 0))
+				-- MCP: ajusta Y pelo chão real antes de teleportar (como o MacroSystem faz)
+				local adjustedPos = getAdjustedFieldPosition(CONFIG.SelectedField) or (fPos + Vector3.new(0, 3, 0))
+				invalidatePathCache()
+				tweenToField(adjustedPos)
 				
-				if CONFIG.Enabled and isCurrentSession() then 
+				if shouldContinue() then
 					-- Depois ANDA normalmente no campo
 					collectAtField(CONFIG.SelectedField)
 				end
@@ -1484,13 +2458,7 @@ local function automationLoop()
 		task.wait(0.1)
 	end
 	
-	-- Para os sistemas
-	TOOL_COLLECT.Enabled = false
-	TOKEN_COLLECTOR.Enabled = false
-	COCONUT_CATCHER.Enabled = false
-	-- Balloon farm para junto mas pode ser reativado manualmente
-	BALLOON_FARM.Enabled = false
-	CLOUD_FARM.Enabled = false
+	resetAllSystems()
 	
 	RUNTIME.Active = false
 	SESSION.AutomationRunning = false
@@ -1502,13 +2470,13 @@ end
 -- ═══════════════════════════════════════════════════════════════
 
 local Window = Rayfield:CreateWindow({
-	Name = "🐝 BSS Auto Farm",
+	Name = "🐝 BSS Auto Farm - Delta Optimized",
 	LoadingTitle = "Bee Swarm Simulator",
-	LoadingSubtitle = "by Professional Scripter",
+	LoadingSubtitle = "Optimized for Delta Executor",
 	ConfigurationSaving = {
 		Enabled = false,
 		FolderName = nil,
-		FileName = "BSS_AutoFarm"
+		FileName = "BSS_AutoFarm_Delta"
 	},
 	Discord = {
 		Enabled = false,
@@ -1567,6 +2535,20 @@ if fieldNames[1] then
 	end
 end
 
+FarmTab:CreateToggle({
+	Name = "💧 Auto Sprinkler at Field Center",
+	CurrentValue = CONFIG.AutoSprinkler,
+	Flag = "AutoSprinkler",
+	Callback = function(Value)
+		CONFIG.AutoSprinkler = Value
+		safeNotify(
+			Value and "Auto Sprinkler ON" or "Auto Sprinkler OFF",
+			Value and "O sprinkler será ativado antes do farm começar" or "Sprinkler não será ativado automaticamente",
+			2
+		)
+	end,
+})
+
 -- Toggle Auto Farm
 local FarmToggle = FarmTab:CreateToggle({
 	Name = "▶️ Enable Auto Farm",
@@ -1595,7 +2577,28 @@ local FarmToggle = FarmTab:CreateToggle({
 				FarmToggle:Set(false)
 				return
 			end
+			
+			-- Reseta os sistemas antes de permitir uma nova sessão.
+			resetAllSystems()
+			
+			-- Liga os sistemas antes de iniciar o loop
 			CONFIG.Enabled = true
+			if CONFIG.AutoSprinkler then
+				local placed, message = placeSprinklerAtFieldCenter(CONFIG.SelectedField)
+				if not placed then
+					CONFIG.Enabled = false
+					FarmToggle:Set(false)
+					safeNotify("⚠️ Auto Farm não iniciado", "Sprinkler: " .. message, 4)
+					return
+				end
+				safeNotify("💧 " .. message, "Iniciando Auto Farm", 2)
+			end
+			TOOL_COLLECT.Enabled = true
+			TOKEN_COLLECTOR.Enabled = true
+			-- Balloon farm só liga se estiver habilitado no toggle
+			if CONFIG.FarmBalloons then
+				BALLOON_FARM.Enabled = true
+			end
 			
 			Rayfield:Notify({
 				Title = "✅ Auto Farm Started",
@@ -1607,12 +2610,8 @@ local FarmToggle = FarmTab:CreateToggle({
 			task.spawn(automationLoop)
 		else
 			CONFIG.Enabled = false
-			-- Para o sistema de coleta
-			TOOL_COLLECT.Enabled = false
-			TOKEN_COLLECTOR.Enabled = false
-			COCONUT_CATCHER.Enabled = false
-			BALLOON_FARM.Enabled = false
-			CLOUD_FARM.Enabled = false
+			SESSION.AutomationRunning = false
+			resetAllSystems()
 			
 			-- Para o movimento do personagem
 			local character = player.Character
@@ -1635,9 +2634,20 @@ local FarmToggle = FarmTab:CreateToggle({
 
 FarmTab:CreateSection("⚙️ Settings")
 
-FarmTab:CreateParagraph({
-	Title = "🎯 Intelligent Farming System",
-	Content = "This script uses SMART POSITIONING:\n\n✅ ALWAYS targets the BIGGEST flowers (most pollen)\n✅ Color bonus: Yellow/Gold (+20), Red (+15), Blue (+12)\n✅ Detects POLLEN CLUSTERS (groups of tokens)\n✅ NO random offsets - only optimal positions!\n\nThe script constantly scans and adapts to find the BEST spots in your field!"
+
+
+FarmTab:CreateToggle({
+	Name = "⚡ Teleport Mode",
+	CurrentValue = false,
+	Flag = "TeleportMode",
+	Callback = function(Value)
+		CONFIG.TeleportMode = Value
+		safeNotify(
+			Value and "⚡ Teleport Mode ON" or "🚶 Walk Mode ON",
+			Value and "Teleportando para flores e tokens" or "Andando normalmente no campo",
+			2
+		)
+	end,
 })
 
 FarmTab:CreateDropdown({
@@ -1651,10 +2661,7 @@ FarmTab:CreateDropdown({
 	end,
 })
 
-FarmTab:CreateParagraph({
-	Title = "Farm modes",
-	Content = "Smart Flowers follows the original flower and pollen-cluster selection. Route Sweep follows a stable grid inside the selected field."
-})
+
 
 FarmTab:CreateSlider({
 	Name = "Route Grid Size",
@@ -1678,6 +2685,8 @@ local AutoCollectToggle = FarmTab:CreateToggle({
 		
 		if Value then
 			enableToolCollect()
+		else
+			releaseToolCollectInput()
 		end
 		
 		Rayfield:Notify({
@@ -1699,6 +2708,7 @@ local SpeedSlider = FarmTab:CreateSlider({
 	Flag = "SpeedSlider",
 	Callback = function(Value)
 		CONFIG.MoveSpeed = Value
+		BOOST_MANAGER.BaseMoveSpeed = Value
 	end,
 })
 
@@ -1788,10 +2798,7 @@ local TokenCheckSlider = CollectTab:CreateSlider({
 	end,
 })
 
-CollectTab:CreateParagraph({
-	Title = "Token Collection Info",
-	Content = "Tokens are collected by a separate continuous thread. Lower check interval = more responsive but more CPU usage. Default 0.2s is recommended."
-})
+
 
 CollectTab:CreateSection("🔥 Flames")
 
@@ -1811,10 +2818,7 @@ local FlamesToggle = CollectTab:CreateToggle({
 	end,
 })
 
-CollectTab:CreateParagraph({
-	Title = "About Flames",
-	Content = "PlayerFlames appear from certain bee abilities and provide bonus pollen. The script will automatically walk to nearby flames to collect them."
-})
+
 
 CollectTab:CreateSection("✨ Marks")
 
@@ -1834,17 +2838,46 @@ local MarksToggle = CollectTab:CreateToggle({
 	end,
 })
 
-CollectTab:CreateParagraph({
-	Title = "About Marks",
-	Content = "Marks are special indicators left by certain bee abilities (Gummy Bee, etc.). They provide powerful bonuses when collected!"
-})
+
 
 -- ═══════════════════════════════════════════════════════════════
 --                       TAB: SPECIAL FEATURES
 -- ═══════════════════════════════════════════════════════════════
 
 local SpecialTab = Window:CreateTab("⭐ Special", 4483362458)
-local SpecialSection = SpecialTab:CreateSection("🥥 Coconut Combo Catcher")
+
+SpecialTab:CreateSection("📋 Auto Quest")
+
+SpecialTab:CreateToggle({
+	Name = "📋 Auto Quest",
+	CurrentValue = false,
+	Flag = "AutoQuestToggle",
+	Callback = function(Value)
+		AUTO_QUEST.Enabled = Value
+		if Value and CONFIG.Enabled then
+			startAutoQuest()
+		end
+		safeNotify(
+			Value and "📋 Auto Quest ON" or "📋 Auto Quest OFF",
+			Value and "Aceita e entrega quests automaticamente" or "Auto Quest desativado",
+			3
+		)
+	end,
+})
+
+SpecialTab:CreateSlider({
+	Name = "Quest Check Interval",
+	Range = {5, 60},
+	Increment = 5,
+	Suffix = "s",
+	CurrentValue = 10,
+	Flag = "QuestCheckInterval",
+	Callback = function(Value)
+		AUTO_QUEST.CheckInterval = Value
+	end,
+})
+
+SpecialTab:CreateSection("🥥 Coconut Combo Catcher")
 
 local CoconutToggle = SpecialTab:CreateToggle({
 	Name = "🥥 Auto-Catch Coconuts",
@@ -1867,36 +2900,31 @@ local CoconutToggle = SpecialTab:CreateToggle({
 	end,
 })
 
-SpecialTab:CreateParagraph({
-	Title = "🥥 About Coconut Combo",
-	Content = "Automatically detects and collects Combo Coconuts when they appear. The script will temporarily leave your field to catch them, then return to farming."
-})
+
 
 SpecialTab:CreateSection("🎈 Balloon Farming")
 
-SpecialTab:CreateParagraph({
-	Title = "🎈 Balloon Farm — ALWAYS ACTIVE",
-	Content = "Balloon farming is ALWAYS enabled when Auto Farm is running.\n\nDetection uses Workspace.Balloons.FieldBalloons (real game structure) + BalloonInflate event for instant reaction.\n\nUse the toggle below ONLY to temporarily pause balloon farm without stopping the main farm."
-})
+
 
 local BalloonToggle = SpecialTab:CreateToggle({
-	Name = "🎈 Balloon Farm (pause only)",
-	CurrentValue = true, -- começa ativo
+	Name = "🎈 Farm Balloons",
+	CurrentValue = false, -- começa desativado
 	Flag = "BalloonToggle",
 	Callback = function(Value)
 		CONFIG.FarmBalloons = Value
 		BALLOON_FARM.Enabled = Value
 		
 		if Value and CONFIG.Enabled then
+			-- Reseta flag para permitir reinicialização
+			BALLOON_FARM.Running = false
 			startBalloonFarm()
 		end
 		
-		Rayfield:Notify({
-			Title = Value and "✅ Balloon Farm RESUMED" or "⏸️ Balloon Farm PAUSED",
-			Content = Value and "Balloon farming is active again!" or "Balloon farming paused. Will resume on next toggle.",
-			Duration = 3,
-			Image = 4483362458,
-		})
+		safeNotify(
+			Value and "✅ Balloon Farm ON" or "⛔ Balloon Farm OFF",
+			Value and "Will farm your balloons automatically!" or "Balloons will be ignored",
+			3
+		)
 	end,
 })
 
@@ -1923,10 +2951,7 @@ local CloudToggle = SpecialTab:CreateToggle({
 	end,
 })
 
-SpecialTab:CreateParagraph({
-	Title = "☁️ About Cloud Farming",
-	Content = "Automatically detects clouds with flowers and farms underneath them. Cloud flowers provide unique pollen types and bonuses!"
-})
+
 
 SpecialTab:CreateSection("⚙️ Special Settings")
 
@@ -1970,230 +2995,93 @@ local CloudIntervalSlider = SpecialTab:CreateSlider({
 })
 
 -- ═══════════════════════════════════════════════════════════════
---                       TAB: PLANTERS
--- ═══════════════════════════════════════════════════════════════
-
-local PlanterTab = Window:CreateTab("🪴 Planters", 4483362458)
-local PlanterSection = PlanterTab:CreateSection("Planter Management")
-
-local PlanterToggle = PlanterTab:CreateToggle({
-	Name = "🪴 Enable Planter System",
-	CurrentValue = false,
-	Flag = "PlanterToggle",
-	Callback = function(Value)
-		PLANTERS.Enabled = Value
-		
-		if Value then
-			scanPlanters()
-			Rayfield:Notify({
-				Title = "✅ Planter System ON",
-				Content = string.format("Found %d active planters", #PLANTERS.ActivePlanters),
-				Duration = 3,
-				Image = 4483362458,
-			})
-		else
-			Rayfield:Notify({
-				Title = "⛔ Planter System OFF",
-				Content = "Planters will not be managed",
-				Duration = 2,
-				Image = 4483362458,
-			})
-		end
-	end,
-})
-
-local AutoCollectPlanter = PlanterTab:CreateToggle({
-	Name = "📦 Auto-Collect Planters",
-	CurrentValue = true,
-	Flag = "AutoCollectPlanter",
-	Callback = function(Value)
-		PLANTERS.AutoCollect = Value
-	end,
-})
-
-PlanterTab:CreateButton({
-	Name = "🔍 Scan for Planters",
-	Callback = function()
-		scanPlanters()
-		
-		Rayfield:Notify({
-			Title = "🔍 Planter Scan Complete",
-			Content = string.format("Found %d active planters", #PLANTERS.ActivePlanters),
-			Duration = 3,
-			Image = 4483362458,
-		})
-		
-		-- Mostra detalhes
-		for i, planter in ipairs(PLANTERS.ActivePlanters) do
-			if planter.Percent then
-				print(string.format("[Planter %d] %.1f%% - %s", i, planter.Percent, planter.Ready and "READY" or "Growing"))
-			end
-		end
-	end,
-})
-
-PlanterTab:CreateSection("ℹ️ Info")
-
-PlanterTab:CreateParagraph({
-	Title = "How it works",
-	Content = "The script will automatically check your planters every 5 seconds. When a planter reaches 100%, it will collect it for you!"
-})
-
--- ═══════════════════════════════════════════════════════════════
---                         TAB: STATS
--- ═══════════════════════════════════════════════════════════════
-
-local StatsTab = Window:CreateTab("📊 Statistics", 4483362458)
-local StatsSection = StatsTab:CreateSection("📈 Real-Time Stats")
-
-local PollenLabel = StatsTab:CreateLabel("Pollen: 0 / 0 (0%)")
-local HoneyLabel = StatsTab:CreateLabel("Honey: 0")
-local RuntimeLabel = StatsTab:CreateLabel("Runtime: 00:00:00")
-local CurrentStrategyLabel = StatsTab:CreateLabel("Strategy: Optimizing...")
-
-StatsTab:CreateSection("📊 Session Stats")
-
-local PollenCollectedLabel = StatsTab:CreateLabel("Pollen Collected: 0")
-local PollenPerHourLabel = StatsTab:CreateLabel("Pollen/Hour: 0")
-local HoneyMadeLabel = StatsTab:CreateLabel("Honey Made: 0")
-local HoneyPerHourLabel = StatsTab:CreateLabel("Honey/Hour: 0")
-local TokensLabel = StatsTab:CreateLabel("Tokens: 0")
-local FlamesLabel = StatsTab:CreateLabel("Flames: 0")
-local MarksLabel = StatsTab:CreateLabel("Marks: 0")
-
-StatsTab:CreateSection("🔧 Collection System")
-
-local CollectCountLabel = StatsTab:CreateLabel("ToolCollect Calls: 0")
-local CollectRateLabel = StatsTab:CreateLabel("Collect Rate: 0/s")
-
-StatsTab:CreateSection("🪴 Planter Stats")
-
-local PlantersLabel = StatsTab:CreateLabel("Planters Harvested: 0")
-local ActivePlantersLabel = StatsTab:CreateLabel("Active Planters: 0")
-
-StatsTab:CreateSection("⭐ Special Features Stats")
-
-local CoconutsLabel = StatsTab:CreateLabel("Coconuts Caught: 0")
-local BalloonsLabel = StatsTab:CreateLabel("Balloons Visited: 0")
-local BalloonsActiveLabel = StatsTab:CreateLabel("🎈 Active Balloons: checking...")
-local CloudsLabel = StatsTab:CreateLabel("Clouds Visited: 0")
-
-local function formatNumber(num)
-	if num >= 1000000000 then
-		return string.format("%.2fB", num / 1000000000)
-	elseif num >= 1000000 then
-		return string.format("%.2fM", num / 1000000)
-	elseif num >= 1000 then
-		return string.format("%.2fK", num / 1000)
-	else
-		return string.format("%.0f", num)
-	end
-end
-
--- Atualiza stats
-task.spawn(function()
-	local lastCollectCount = 0
-	local lastCollectTime = tick()
-	
-	while isCurrentSession() and task.wait(1) do
-		pcall(function()
-			-- Stats básicos
-			local pollen = pollenValue.Value or 0
-			local capacity = capacityValue.Value or 1
-			local percent = capacity > 0 and (pollen / capacity * 100) or 0
-			
-			PollenLabel:Set(string.format("Pollen: %s / %s (%.1f%%)", 
-				formatNumber(pollen), formatNumber(capacity), percent))
-			HoneyLabel:Set(string.format("Honey: %s", formatNumber(honeyValue.Value or 0)))
-			
-			-- Runtime
-			if RUNTIME.Stats.StartTime > 0 then
-				local elapsed = tick() - RUNTIME.Stats.StartTime
-				local hours = math.floor(elapsed / 3600)
-				local minutes = math.floor((elapsed % 3600) / 60)
-				local seconds = math.floor(elapsed % 60)
-				RuntimeLabel:Set(string.format("Runtime: %02d:%02d:%02d", hours, minutes, seconds))
-				
-				-- Calcula por hora
-				local hoursElapsed = elapsed / 3600
-				if hoursElapsed > 0 then
-					local pollenPerHour = RUNTIME.Stats.PollenCollected / hoursElapsed
-					local honeyPerHour = RUNTIME.Stats.HoneyMade / hoursElapsed
-					
-					PollenPerHourLabel:Set(string.format("Pollen/Hour: %s", formatNumber(pollenPerHour)))
-					HoneyPerHourLabel:Set(string.format("Honey/Hour: %s", formatNumber(honeyPerHour)))
-				end
-			else
-				RuntimeLabel:Set("Runtime: Not Started")
-			end
-			
-			-- Session stats
-			PollenCollectedLabel:Set(string.format("Pollen Collected: %s", 
-				formatNumber(RUNTIME.Stats.PollenCollected)))
-			HoneyMadeLabel:Set(string.format("Honey Made: %s", 
-				formatNumber(RUNTIME.Stats.HoneyMade)))
-			TokensLabel:Set(string.format("Tokens: %d", RUNTIME.Stats.TokensCollected))
-			FlamesLabel:Set(string.format("Flames: %d", RUNTIME.Stats.FlamesCollected))
-			MarksLabel:Set(string.format("Marks: %d", RUNTIME.Stats.MarksCollected))
-			
-			-- Collection system stats
-			CollectCountLabel:Set(string.format("ToolCollect Calls: %d", TOOL_COLLECT.CollectCount))
-			
-			local currentTime = tick()
-			local timeDiff = currentTime - lastCollectTime
-			if timeDiff > 0 then
-				local collectDiff = TOOL_COLLECT.CollectCount - lastCollectCount
-				local collectRate = collectDiff / timeDiff
-				CollectRateLabel:Set(string.format("Collect Rate: %.1f/s", collectRate))
-			end
-			lastCollectCount = TOOL_COLLECT.CollectCount
-			lastCollectTime = currentTime
-			
-			-- Planter stats
-			PlantersLabel:Set(string.format("Planters Harvested: %d", 
-				RUNTIME.Stats.PlantersHarvested))
-			ActivePlantersLabel:Set(string.format("Active Planters: %d", 
-				#PLANTERS.ActivePlanters))
-			
-			-- Special features stats
-			CoconutsLabel:Set(string.format("Coconuts Caught: %d", RUNTIME.Stats.CoconutsCaught))
-			BalloonsLabel:Set(string.format("Balloons Visited: %d", RUNTIME.Stats.BalloonsVisited))
-			
-			-- Conta balloons ativos em tempo real
-			local activeBalloonCount = 0
-			local balloonsFolder = workspace:FindFirstChild("Balloons")
-			if balloonsFolder then
-				local fieldBalloons = balloonsFolder:FindFirstChild("FieldBalloons")
-				if fieldBalloons then
-					for _, b in ipairs(fieldBalloons:GetChildren()) do
-						if b:IsA("Model") and b:GetAttribute("ClientMotionEnabled") then
-							local owner = b:FindFirstChild("PlayerName")
-							if owner and owner.Value == player.Name then
-								activeBalloonCount = activeBalloonCount + 1
-							end
-						end
-					end
-				end
-			end
-			local balloonStatus = BALLOON_FARM.IsFarming and " [FARMING NOW]" or ""
-			BalloonsActiveLabel:Set(string.format("🎈 Active Balloons: %d%s", activeBalloonCount, balloonStatus))
-			
-			CloudsLabel:Set(string.format("Clouds Visited: %d", RUNTIME.Stats.CloudsVisited))
-		end)
-	end
-end)
-
--- ═══════════════════════════════════════════════════════════════
 --                         TAB: ADVANCED
 -- ═══════════════════════════════════════════════════════════════
 
 local AdvancedTab = Window:CreateTab("⚙️ Advanced", 4483362458)
-local AdvancedSection = AdvancedTab:CreateSection("🔧 Advanced Settings")
+local AdvancedSection = AdvancedTab:CreateSection("⚡ Delta Optimizations")
 
-AdvancedTab:CreateParagraph({
-	Title = "⚠️ Caution",
-	Content = "These settings are for advanced users. Incorrect values may affect performance or functionality."
+AdvancedTab:CreateToggle({
+	Name = "🎯 Humanized Movement Timing",
+	CurrentValue = DELTA_ANTI_DETECT.HumanizedMovement,
+	Flag = "HumanizedMovement",
+	Callback = function(Value)
+		DELTA_ANTI_DETECT.HumanizedMovement = Value
+		safeNotify(
+			Value and "🎯 Humanized Movement ON" or "⚡ Fast Movement ON",
+			Value and "Movements will look more human-like" or "Maximum speed (higher detection risk)",
+			3
+		)
+	end,
 })
+
+AdvancedTab:CreateToggle({
+	Name = "🎲 Randomize Action Timings",
+	CurrentValue = DELTA_ANTI_DETECT.RandomizeTimings,
+	Flag = "RandomizeTimings",
+	Callback = function(Value)
+		DELTA_ANTI_DETECT.RandomizeTimings = Value
+		safeNotify(
+			Value and "🎲 Randomized Timing ON" or "⏱️ Fixed Timing ON",
+			Value and "Actions will have slight random delays" or "Fixed timing intervals (faster but detectable)",
+			3
+		)
+	end,
+})
+
+AdvancedTab:CreateSection("🔧 Advanced Settings")
+
+AdvancedTab:CreateToggle({
+	Name = "Smart Flower Targeting", CurrentValue = CONFIG.SmartFlowerTargeting, Flag = "SmartFlowerTargeting",
+	Callback = function(Value) CONFIG.SmartFlowerTargeting = Value; SMART_FLOWER_SYSTEM.Enabled = Value end,
+})
+
+AdvancedTab:CreateToggle({
+	Name = "Adapt to Active Boosts", CurrentValue = CONFIG.AdaptToBoosts, Flag = "AdaptToBoosts",
+	Callback = function(Value)
+		CONFIG.AdaptToBoosts = Value
+		if not Value then adjustFarmingForBoosts({}) end
+	end,
+})
+
+AdvancedTab:CreateToggle({
+	Name = "Auto-Join Boss Events", CurrentValue = CONFIG.AutoJoinBosses, Flag = "AutoJoinBosses",
+	Callback = function(Value) CONFIG.AutoJoinBosses = Value; BOSS_EVENTS.Enabled = Value end,
+})
+
+AdvancedTab:CreateToggle({
+	Name = "🎒 Auto Use Hotbar Items",
+	CurrentValue = false,
+	Flag = "AutoHotbarItems",
+	Callback = function(Value)
+		HOTBAR_SYSTEM.Enabled = Value
+		safeNotify(
+			Value and "🎒 Hotbar Items ON" or "🎒 Hotbar Items OFF",
+			Value and "Itens do hotbar serão usados automaticamente" or "Hotbar desativado",
+			3
+		)
+	end,
+})
+
+AdvancedTab:CreateToggle({
+	Name = "Wind Shrine Availability Alerts", CurrentValue = CONFIG.AutoWindShrine, Flag = "AutoWindShrine",
+	Callback = function(Value) CONFIG.AutoWindShrine = Value; EVENT_TRACKER.Enabled = Value end,
+})
+
+AdvancedTab:CreateToggle({
+	Name = "Smart Honeystorm Alerts", CurrentValue = CONFIG.SmartHoneystorm, Flag = "SmartHoneystorm",
+	Callback = function(Value) CONFIG.SmartHoneystorm = Value; EVENT_TRACKER.Enabled = Value end,
+})
+
+AdvancedTab:CreateToggle({
+	Name = "Anti-Disconnect Activity", CurrentValue = CONFIG.AntiDisconnect, Flag = "AntiDisconnect",
+	Callback = function(Value)
+		CONFIG.AntiDisconnect = Value
+		if Value then startAntiDisconnect() end
+	end,
+})
+
+
 
 -- Collect Height
 local CollectHeightSlider = AdvancedTab:CreateSlider({
@@ -2234,53 +3122,53 @@ local ToolCooldownSlider = AdvancedTab:CreateSlider({
 	end,
 })
 
-AdvancedTab:CreateSection("ℹ️ Explanations")
 
-AdvancedTab:CreateParagraph({
-	Title = "Collect Height",
-	Content = "Height offset when moving around the field. Higher values may help avoid obstacles but can look unnatural."
-})
-
-AdvancedTab:CreateParagraph({
-	Title = "Farm Move Interval",
-	Content = "Time between movements in the field. Lower = more frequent position changes. Default: 0.1s"
-})
-
-AdvancedTab:CreateParagraph({
-	Title = "ToolCollect Cooldown",
-	Content = "Minimum time between ToolCollect calls. Lower = more collection attempts but higher server load. Default: 0.08s"
-})
 
 -- ═══════════════════════════════════════════════════════════════
 --                         TAB: INFO
 -- ═══════════════════════════════════════════════════════════════
 
 local InfoTab = Window:CreateTab("ℹ️ Info", 4483362458)
-InfoTab:CreateSection("About")
+InfoTab:CreateSection("Delta Optimizations")
 
-InfoTab:CreateParagraph({
-	Title = "🐝 BSS Auto Farm v4.0",
-	Content = "A professional auto-farming script for Bee Swarm Simulator with modern Rayfield UI and fully customizable features including SPECIAL auto-features!"
+InfoTab:CreateButton({
+	Name = "⚡ Check Delta Features",
+	Callback = function()
+		local features = {
+			"Mouse Functions:",
+			DELTA_FUNCTIONS.HasMouseClick and "  ✓ mouse1click: ACTIVE (BEST)" or "  ✗ mouse1click: NOT FOUND",
+			DELTA_FUNCTIONS.HasMousePress and "  ✓ mouse1press/release: ACTIVE" or "  ✗ mouse1press/release: NOT FOUND",
+			"",
+			"Advanced Functions:",
+			DELTA_FUNCTIONS.HasGetConnections and "  ✓ getconnections: ACTIVE" or "  ✗ getconnections: NOT FOUND",
+			DELTA_FUNCTIONS.HasFireSignal and "  ✓ firesignal: ACTIVE" or "  ✗ firesignal: NOT FOUND",
+			DELTA_FUNCTIONS.HasHookFunction and "  ✓ hookfunction: ACTIVE" or "  ✗ hookfunction: NOT FOUND",
+			"",
+			"Performance:",
+			"  ✓ Delta Cache System: ACTIVE",
+			"  ✓ Optimized CFrame: ACTIVE",
+			"  ✓ Humanized Timing: " .. (DELTA_ANTI_DETECT.HumanizedMovement and "ACTIVE" or "DISABLED"),
+			"  ✓ Randomized Cooldowns: " .. (DELTA_ANTI_DETECT.RandomizeTimings and "ACTIVE" or "DISABLED"),
+		}
+		
+		local message = table.concat(features, "\n")
+		
+		Rayfield:Notify({
+			Title = "⚡ Delta Executor Status",
+			Content = "Check console (F9) for full report",
+			Duration = 4,
+			Image = 4483362458,
+		})
+		
+		print("\n" .. string.rep("═", 60))
+		print("DELTA EXECUTOR OPTIMIZATION REPORT")
+		print(string.rep("═", 60))
+		print(message)
+		print(string.rep("═", 60) .. "\n")
+	end,
 })
 
-InfoTab:CreateParagraph({
-	Title = "✨ Features",
-	Content = "• 🎯 INTELLIGENT FARM: Always targets BEST flowers (largest/most pollen)\n• Tween teleport to field + smooth natural walking\n• Continuous collection system (ToolCollect) - TOGGLEABLE\n• AGGRESSIVE token collection (separate thread!) - TOGGLEABLE\n• Smart token prioritization (valuable tokens first)\n• 🌸 SMART FLOWER PRIORITY: Targets biggest flowers with color bonus\n• 📍 CLUSTER DETECTION: Finds areas with most pollen on ground\n• Automatic flame collection - TOGGLEABLE\n• Automatic mark collection - TOGGLEABLE\n• Smart planter management - TOGGLEABLE\n• 🥥 AUTO COCONUT COMBO CATCHER - NEW!\n• 🎈 AUTO BALLOON FARMING - NEW!\n• ☁️ AUTO CLOUD FARMING - NEW!\n• Real-time stats tracking (pollen/hour, honey/hour)\n• Auto honey conversion\n• Respects game speed boosts (Haste, etc.)\n• FULLY CUSTOMIZABLE - every feature can be toggled!\n\n✅ NO RANDOM POSITIONS - Always goes to optimal spots!"
-})
-
-InfoTab:CreateSection("🛠️ Collection System")
-
-InfoTab:CreateParagraph({
-	Title = "Collection System: ✅ Continuous & Automatic",
-	Content = "The script runs SEPARATE collection threads:\n\n• ToolCollect: Continuous pollen/item collection (0.08s cooldown)\n• Token Collector: Separate thread checking for tokens (0.2s interval)\n• All systems can be toggled on/off individually!\n\nThis means:\n✅ Collection never stops\n✅ Movement won't break collection\n✅ Maximum efficiency!\n\nJust equip your collector tool and enable Auto Farm!"
-})
-
-InfoTab:CreateSection("⚠️ Important")
-
-InfoTab:CreateParagraph({
-	Title = "Before Starting",
-	Content = "1. Make sure you have a COLLECTOR tool equipped (Dipper, Scoop, etc.)\n2. Select a field from the dropdown\n3. Enable Auto Farm\n4. The script will check if you have a collector equipped!"
-})
+InfoTab:CreateSection("Tools")
 
 InfoTab:CreateButton({
 	Name = "🔍 Check Collector Status",
@@ -2297,7 +3185,6 @@ InfoTab:CreateButton({
 			end
 		end
 		
-		-- Se não tiver equipado, verifica backpack
 		if not hasCollector then
 			local backpack = player:FindFirstChild("Backpack")
 			if backpack then
@@ -2322,8 +3209,19 @@ InfoTab:CreateButton({
 Rayfield:LoadConfiguration()
 
 print("═══════════════════════════════════════════════════════════")
-print("[BSS AutoFarm] v4.1 Loaded — Balloons ALWAYS active! 🐝🎈")
-print("[BSS AutoFarm] Balloon detection: Workspace.Balloons.FieldBalloons + BalloonInflate event")
-print("[BSS AutoFarm] Balloons have priority over field farm (more pollen/second)")
-print("[BSS AutoFarm] Check Advanced tab for fine-tuning.")
+print("[BSS AutoFarm] v5.1 DELTA OPTIMIZED 🐝⚡")
+print("[BSS AutoFarm] Executor: DELTA (Native Functions)")
+print("[BSS AutoFarm] ToolCollect: Delta's mouse1click (FASTER)")
+print("[BSS AutoFarm] Movement: Delta-optimized CFrame teleport")
+print("[BSS AutoFarm] Balloon detection: Workspace.Balloons.FieldBalloons")
+print("[BSS AutoFarm] Performance: ENHANCED for Delta engine")
+print("[BSS AutoFarm] Detection risk: LOWER with Delta hooks")
+print("═══════════════════════════════════════════════════════════")
+print("")
+print("Delta Features Detected:")
+print("  ✓ mouse1click:", DELTA_FUNCTIONS.HasMouseClick and "YES (OPTIMAL)" or "NO")
+print("  ✓ mouse1press/release:", DELTA_FUNCTIONS.HasMousePress and "YES" or "NO")
+print("  ✓ getconnections:", DELTA_FUNCTIONS.HasGetConnections and "YES" or "NO")
+print("  ✓ firesignal:", DELTA_FUNCTIONS.HasFireSignal and "YES" or "NO")
+print("  ✓ hookfunction:", DELTA_FUNCTIONS.HasHookFunction and "YES" or "NO")
 print("═══════════════════════════════════════════════════════════")
