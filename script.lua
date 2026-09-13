@@ -220,7 +220,8 @@ CONFIG = {
 	
 	-- Farm Mode
 	IntelligentFarm = true, -- Vai para flores melhores
-	FarmMode = "Smart Flowers",
+	-- Mantém o percurso previsível de 9 pontos (grade 3x3) como padrão.
+	FarmMode = "Route Sweep",
 	
 	-- Coconut Catcher
 	CoconutCatcher = false,
