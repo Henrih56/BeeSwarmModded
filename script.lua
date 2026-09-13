@@ -335,7 +335,7 @@ local function tweenToField(destination)
 end
 
 -- Movimento normal (andar com Humanoid:MoveTo)
-local function moveTo(destination)
+local function moveTo(destination, arrivalDistance)
 	local character = player.Character
 	if not character then return false end
 	
@@ -356,7 +356,7 @@ local function moveTo(destination)
 	-- Aguarda chegar no destino
 	local startTime = tick()
 	local timeout = 15 -- segundos
-	local arrivedDistance = 5 -- studs
+	local arrivedDistance = arrivalDistance or 5 -- studs
 	
 	while CONFIG.Enabled and tick() - startTime < timeout do
 		if not root.Parent then return false end
@@ -434,7 +434,10 @@ local function startTokenCollector()
 	
 	task.spawn(function()
 		while TOKEN_COLLECTOR.Enabled and CONFIG.Enabled and isCurrentSession() do
-			if CONFIG.CollectTokens and not collectingToken then
+			-- Na rota em grade, o coletor paralelo alteraria o MoveTo da rota e
+			-- deixaria a caminhada travando. O ToolCollect continua coletando
+			-- normalmente os tokens pelos quais o personagem passa.
+			if CONFIG.CollectTokens and CONFIG.FarmMode ~= "Route Sweep" and not collectingToken then
 				checkAndCollectTokens()
 			end
 			task.wait(TOKEN_COLLECTOR.CheckInterval)
@@ -1266,6 +1269,14 @@ local function collectAtField(fieldObj)
 	local currentFlowerIndex = 1
 	local fieldRoute = buildFieldRoute(fPos, fSize)
 	local routeIndex = 1
+	local routeArrivalDistance = 5
+	if CONFIG.FarmMode == "Route Sweep" and fSize then
+		local gridSize = math.clamp(math.floor(CONFIG.GridSize or 3), 3, 10)
+		local halfX = math.max(2, math.min(CONFIG.FieldRadius, (fSize.X * 0.5) - 4))
+		local halfZ = math.max(2, math.min(CONFIG.FieldRadius, (fSize.Z * 0.5) - 4))
+		local pointSpacing = math.min((halfX * 2) / (gridSize - 1), (halfZ * 2) / (gridSize - 1))
+		routeArrivalDistance = math.clamp(pointSpacing * 0.3, 1.25, 4)
+	end
 	
 	-- Primeiro escaneamento
 	currentFlowers = findFlowersInField(fieldObj)
@@ -1340,7 +1351,7 @@ local function collectAtField(fieldObj)
 		end
 
 		-- Move para a posicao OTIMA
-		moveTo(targetPos)
+		moveTo(targetPos, CONFIG.FarmMode == "Route Sweep" and routeArrivalDistance or nil)
 		if not CONFIG.Enabled then return end
 		
 		-- Fica coletando por um tempo antes de reavaliação
