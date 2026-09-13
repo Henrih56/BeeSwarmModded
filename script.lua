@@ -307,10 +307,10 @@ local CONSTANTS = {
 	BALLOON_POSITION_OFFSET_Y = -8,
 	BALLOON_POSITION_UPDATE_INTERVAL = 1.5, -- Update mais frequente
 	BALLOON_MOVEMENT_THRESHOLD = 15,
-if not flowerZones or not hivePlatforms then
-	warn("[BSS AutoFarm] FlowerZones ou HivePlatforms não encontrados. Certifique-se de executar no BSS.")
-	-- Continua mesmo assim para carregar a UI
-endART_FLOWER_SCAN_TIMEOUT = 1.5, -- Scan mais rápido
+	FLOWER_CACHE_TIMEOUT = 20,
+	WORKSPACE_CACHE_TIMEOUT = 5,
+	COCONUT_MAX_DISTANCE = 200,
+	SMART_FLOWER_SCAN_TIMEOUT = 1.5, -- Scan mais rápido
 	BOSS_CHECK_INTERVAL = 1.5, -- Check mais frequente
 }
 
