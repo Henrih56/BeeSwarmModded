@@ -3415,6 +3415,78 @@ InfoTab:CreateButton({
 	end,
 })
 
+InfoTab:CreateSection("⚠️ Script Control")
+
+InfoTab:CreateButton({
+	Name = "🗑️ Unload Script",
+	Callback = function()
+		-- Confirmação de segurança
+		Rayfield:Notify({
+			Title = "⚠️ Unloading Script...",
+			Content = "Stopping all systems and removing GUI in 2 seconds...",
+			Duration = 2,
+			Image = 4483362458,
+		})
+		
+		task.wait(2)
+		
+		-- Para todos os sistemas
+		print("[BSS AutoFarm] Unloading script...")
+		SESSION.StopRequested = true
+		CONFIG.Enabled = false
+		RUNTIME.Active = false
+		
+		-- Para sistemas específicos
+		TOOL_COLLECT.Enabled = false
+		TOKEN_COLLECTOR.Enabled = false
+		COCONUT_CATCHER.Enabled = false
+		BALLOON_FARM.Enabled = false
+		CLOUD_FARM.Enabled = false
+		HOTBAR_SYSTEM.Enabled = false
+		AUTO_QUEST.Enabled = false
+		ANTI_DISCONNECT.Enabled = false
+		BOSS_EVENTS.Enabled = false
+		EVENT_TRACKER.Enabled = false
+		
+		-- Libera input do mouse
+		releaseToolCollectInput()
+		
+		-- Aguarda loops finalizarem
+		task.wait(1)
+		
+		-- Remove a GUI
+		pcall(function()
+			if game:GetService("CoreGui"):FindFirstChild("Rayfield") then
+				game:GetService("CoreGui").Rayfield:Destroy()
+			end
+		end)
+		
+		-- Remove da sessão global
+		_G.BSSAutoFarmSession = nil
+		
+		-- Restaura WalkSpeed original
+		pcall(function()
+			local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+			if humanoid then
+				humanoid.WalkSpeed = 16 -- velocidade padrão do BSS
+			end
+		end)
+		
+		print("[BSS AutoFarm] ✅ Script unloaded successfully!")
+		print("[BSS AutoFarm] All systems stopped and GUI removed.")
+		print("[BSS AutoFarm] You can safely close this or execute another script.")
+		
+		-- Notificação final via StarterGui (já que Rayfield foi destruída)
+		pcall(function()
+			game.StarterGui:SetCore("SendNotification", {
+				Title = "BSS AutoFarm Unloaded";
+				Text = "Script removed successfully! Safe to run another script.";
+				Duration = 5;
+			})
+		end)
+	end,
+})
+
 -- Não restauramos configuração automaticamente: alguns executores reaplicam
 -- o valor salvo de AutoFarmToggle após o clique e desligam o farm na sequência.
 
