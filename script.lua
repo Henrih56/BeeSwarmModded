@@ -2453,7 +2453,10 @@ local function collectAtField(fieldObj)
 			end
 		end
 		local pollenPercent = safeGetPollenPercent()
-		if pollenPercent >= CONFIG.ConvertAt then
+		-- Só encerra a rota para a conversão controlada pelo script. Quando ela
+		-- está desligada, o conversor automático do próprio jogo pode agir sem
+		-- que o personagem interrompa o farm.
+		if CONFIG.AutoConvert and pollenPercent >= CONFIG.ConvertAt then
 			break
 		end
 		
@@ -2624,16 +2627,6 @@ local function automationLoop()
 				RUNTIME.Stats.HoneyMade = RUNTIME.Stats.HoneyMade + (currentHoney - RUNTIME.Stats.LastHoneyValue)
 			end
 			RUNTIME.Stats.LastHoneyValue = currentHoney
-		elseif not CONFIG.AutoConvert and safeGetPollenPercent() >= CONFIG.ConvertAt then
-			-- Avisa que a bag está cheia mas não vai converter (Auto Convert desligado)
-			-- Avisa apenas uma vez a cada 60 segundos para não spammar
-			local lastWarning = RUNTIME.Stats.LastConvertWarning or 0
-			if tick() - lastWarning >= 60 then
-				safeNotify("⚠️ Bag Full!", "Auto Convert is OFF - Convert manually!", 5)
-				RUNTIME.Stats.LastConvertWarning = tick()
-			end
-			-- Continua farmando
-			farmField()
 		else
 			-- Atualiza pólen durante farm
 			local currentPollen = safeGetStatValue(pollenValue)
