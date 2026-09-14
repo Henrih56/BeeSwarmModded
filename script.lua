@@ -102,6 +102,9 @@ end)
 
 local player = Players.LocalPlayer
 local workspace = game:GetService("Workspace")
+-- Declarada cedo porque os controles de entrada são definidos antes da tabela
+-- de configurações ser preenchida.
+local CONFIG
 
 -- ═══════════════════════════════════════════════════════════════
 --             DELTA EXECUTOR NATIVE OPTIMIZATIONS
@@ -248,6 +251,9 @@ local function releaseToolCollectInput()
 end
 
 local function fireToolCollect()
+	-- No modo Background, nunca injete clique: isso poderia atingir o aplicativo
+	-- que está em foco no Windows. A rota continua usando Humanoid:MoveTo.
+	if CONFIG and CONFIG.BackgroundMode then return false end
 	if COLLECT_INPUT.Held then return true end
 
 	-- Prioriza o botão mantido: funciona em executores que exigem pressão
@@ -311,13 +317,15 @@ local function fireToolCollect()
 	return ok
 end
 
--- Evita que duas rotinas emitam comandos de movimento ao mesmo tempo.
-local MOVEMENT = { Busy = false, Owner = nil }
+-- Evita que duas rotinas emitam comandos de movimento ao mesmo tempo e guarda
+-- contexto suficiente para recuperar somente de bloqueios reais.
+local MOVEMENT = { Busy = false, Owner = nil, LastFailure = nil, LastProgressAt = 0, LastRemaining = nil }
 
 local function requestMovement(owner, action)
 	if MOVEMENT.Busy then return false end
 	MOVEMENT.Busy = true
 	MOVEMENT.Owner = owner
+	MOVEMENT.LastFailure = nil
 	local ok, result = xpcall(action, debug.traceback)
 	MOVEMENT.Busy = false
 	MOVEMENT.Owner = nil
@@ -410,7 +418,6 @@ local FLOWER_CACHE = {
 	currentField = nil
 }
 
-local CONFIG
 local BALLOON_FARM
 local canHoldCollector = function()
 	return false
@@ -469,6 +476,13 @@ local function enableToolCollect()
 	
 	task.spawn(function()
 		while TOOL_COLLECT.Enabled and shouldContinue() do
+			if CONFIG.BackgroundMode then
+				releaseToolCollectInput()
+				TOOL_COLLECT.LastError = "Modo Background: coleta por clique pausada"
+				task.wait(0.5)
+				continue
+			end
+
 			-- A coletora fica equipada permanentemente; a única condição para
 			-- segurarmos o botão é estar realmente dentro do campo selecionado.
 			if not canHoldCollector() then
@@ -546,6 +560,8 @@ end
 CONFIG = {
 	Enabled = false,
 	ManualControlMode = false, -- NOVO: quando true, você pode controlar manualmente
+	-- Continua a rota sem enviar mouse/teclado/VirtualInput ao Windows.
+	BackgroundMode = false,
 	SelectedField = nil,
 	MoveSpeed = 45,
 	FieldRadius = 18,
@@ -687,12 +703,12 @@ local function tweenToFieldImpl(destination)
 	if not shouldContinue() then return false end
 
 	-- NOVO: Teleporte direto até o campo/colmeia se TeleportToField estiver ligado
-	if CONFIG.TeleportToField then
+	if CONFIG.TeleportToField and not CONFIG.BackgroundMode then
 		return teleportTo(destination)
 	end
 
 	-- ORIGINAL: Usa TeleportMode apenas dentro do campo (mantido para compatibilidade)
-	if CONFIG.TeleportMode then
+	if CONFIG.TeleportMode and not CONFIG.BackgroundMode then
 		return teleportTo(destination)
 	end
 
@@ -752,12 +768,15 @@ local function tweenToField(destination, owner)
 	end)
 end
 
--- Chegada ao campo sempre é instantânea. O modo de movimento configurado na
--- interface continua sendo aplicado somente depois, dentro do próprio campo.
-local function teleportToSelectedField(destination)
+-- Respeita a escolha da interface também na chegada ao campo. Antes este ponto
+-- sempre alterava o CFrame, mesmo com "Teleport To Field" desligado.
+local function travelToSelectedField(destination)
 	return requestMovement("field-travel", function()
 		if not shouldContinue() then return false end
-		return teleportTo(destination)
+		if CONFIG.TeleportToField and not CONFIG.BackgroundMode then
+			return teleportTo(destination)
+		end
+		return tweenToFieldImpl(destination)
 	end)
 end
 
@@ -818,37 +837,55 @@ local function moveToImpl(destination, arrivalDistance)
 	local humanoid = character:FindFirstChild("Humanoid")
 	if not root or not humanoid then return false end
 
-	if CONFIG.TeleportMode then
+	if CONFIG.TeleportMode and not CONFIG.BackgroundMode then
 		teleportTo(destination)
 		return true
 	end
 
+	-- Alvos de coleta recebem altura extra para localizar tokens/flores, mas o
+	-- Humanoid só deve caminhar no plano do personagem. Mirar no ponto elevado
+	-- faz o MoveTo aguardar uma chegada impossível e parece que o personagem
+	-- travou.
+	destination = Vector3.new(destination.X, root.Position.Y, destination.Z)
+	local function horizontalDistance(a, b)
+		local delta = a - b
+		return Vector3.new(delta.X, 0, delta.Z).Magnitude
+	end
+
 	local arrived = arrivalDistance or 5
-	if (root.Position - destination).Magnitude <= arrived then return true end
+	if horizontalDistance(root.Position, destination) <= arrived then return true end
 
 	-- Movimento direto: Humanoid:MoveTo sem waypoints intermediários.
 	-- Dentro do campo (terreno plano) isso é suave e contínuo.
 	-- Pathfinding só é usado em tweenToField (distâncias longas com obstáculos).
 	humanoid:MoveTo(destination)
 
-	local start    = tick()
-	local lastPos  = root.Position
-	local stuckFor = 0
+	local start = tick()
+	local initialRemaining = horizontalDistance(root.Position, destination)
+	local maxTravelTime = math.max(4, (initialRemaining / math.max(humanoid.WalkSpeed, 8)) * 2.5 + 1.5)
+	local bestRemaining = initialRemaining
+	local lastProgressAt = start
 
-	while shouldContinue() and tick() - start < 6 do
+	while shouldContinue() and tick() - start < maxTravelTime do
 		if not root.Parent then return false end
-		if (root.Position - destination).Magnitude <= arrived then return true end
+		local remaining = horizontalDistance(root.Position, destination)
+		if remaining <= arrived then return true end
 
-		local moved = (root.Position - lastPos).Magnitude
-		if moved < CONSTANTS.STUCK_MOVEMENT_THRESHOLD then
-			stuckFor = stuckFor + CONSTANTS.MOVE_CHECK_INTERVAL
-			if stuckFor >= 1.5 then return false end
-		else
-			stuckFor = 0
-			lastPos  = root.Position
+		-- Só considera travado quando a distância até o destino não melhora por
+		-- tempo suficiente. Animação, uma curva ou uma queda curta não disparam
+		-- recuperação à toa.
+		if remaining < bestRemaining - 0.75 then
+			bestRemaining = remaining
+			lastProgressAt = tick()
+			MOVEMENT.LastProgressAt = lastProgressAt
+			MOVEMENT.LastRemaining = remaining
+		elseif tick() - lastProgressAt >= 2.25 then
+			MOVEMENT.LastFailure = "Sem progresso em direção ao destino"
+			return false
 		end
 		task.wait(CONSTANTS.MOVE_CHECK_INTERVAL)
 	end
+	MOVEMENT.LastFailure = shouldContinue() and "Tempo de percurso excedido" or "Movimento interrompido"
 	return false
 end
 
@@ -870,6 +907,18 @@ local function getFieldPosition(fieldObj)
 		end
 	end
 	return nil, nil
+end
+
+-- Preserva a orientação real do campo. Algumas zonas são rotacionadas e usar
+-- apenas Position/Size faz a serpentina cortar as bordas ou sair da área.
+local function getFieldFrame(fieldObj)
+	if fieldObj:IsA("BasePart") then
+		return fieldObj.CFrame
+	elseif fieldObj:IsA("Model") then
+		local part = fieldObj.PrimaryPart or fieldObj:FindFirstChildWhichIsA("BasePart", true)
+		return part and part.CFrame or nil
+	end
+	return nil
 end
 
 canHoldCollector = function()
@@ -1063,7 +1112,15 @@ end
 -- Events é um módulo com ClientCall(eventName, ...) que dispara FireServer
 local BSS_EVENTS_MODULE = nil
 
+-- Alguns executores executam este arquivo fora do contexto RobloxScript. Nessa
+-- situação, `require` de ModuleScripts internos do jogo pode disparar o erro
+-- "Cannot require a RobloxScript module from a non RobloxScript context" em
+-- cascata. Não tente carregar esses módulos nesse contexto; os recursos que
+-- dependem deles simplesmente ficam indisponíveis.
+local INTERNAL_MODULE_ACCESS = false
+
 local function getBSSEvents()
+	if not INTERNAL_MODULE_ACCESS then return nil end
 	if BSS_EVENTS_MODULE then return BSS_EVENTS_MODULE end
 	pcall(function()
 		BSS_EVENTS_MODULE = require(
@@ -1079,7 +1136,9 @@ end
 -- MCP: usa itens do hotbar via PlayerActivesCommand (descoberto no MacroSystem)
 -- Isso ativa automaticamente itens como Sprinkler, Field Booster, etc.
 local HOTBAR_SYSTEM = {
-	Enabled = true, -- ATIVADO por padrão para usar Micro-Converter automaticamente
+	-- Depende de ModuleScripts internos; mantenha desligado fora de um LocalScript
+	-- autorizado para evitar erros repetidos no console.
+	Enabled = false,
 	LastUse = 0,
 	Interval = 5, -- verifica a cada 5s (mesmo intervalo do MacroSystem)
 	-- Itens que NÃO devem ser usados automaticamente pelo hotbar
@@ -1093,7 +1152,7 @@ local HOTBAR_SYSTEM = {
 }
 
 local function useHotbarItems()
-	if not HOTBAR_SYSTEM.Enabled then return end
+	if not HOTBAR_SYSTEM.Enabled or not INTERNAL_MODULE_ACCESS then return end
 	if tick() - HOTBAR_SYSTEM.LastUse < HOTBAR_SYSTEM.Interval then return end
 	HOTBAR_SYSTEM.LastUse = tick()
 
@@ -1213,6 +1272,7 @@ local VIRTUAL_USER = nil
 pcall(function() VIRTUAL_USER = game:GetService("VirtualUser") end)
 
 local function simulateActivity()
+	if CONFIG and CONFIG.BackgroundMode then return end
 	-- MCP: usa VirtualUser (mais confiável que CFrame rotation)
 	if VIRTUAL_USER then
 		pcall(function()
@@ -1273,29 +1333,6 @@ local function startAntiDisconnect()
 	end)
 end
 
--- Loop dedicado que força WalkSpeed constantemente.
--- Nada no jogo (BSS, tokens, animações, respawn) consegue interferir.
-local SPEED_ENFORCER = {Running = false}
-local function startSpeedEnforcer()
-	if SPEED_ENFORCER.Running then return end
-	SPEED_ENFORCER.Running = true
-	task.spawn(function()
-		while isCurrentSession() do
-			if CONFIG.Enabled and not CONFIG.ManualControlMode then
-				local char = player.Character
-				if char then
-					local humanoid = char:FindFirstChildOfClass("Humanoid")
-					if humanoid and humanoid.WalkSpeed ~= CONFIG.MoveSpeed then
-						humanoid.WalkSpeed = CONFIG.MoveSpeed
-					end
-				end
-			end
-			task.wait(0.1)
-		end
-		SPEED_ENFORCER.Running = false
-	end)
-end
-
 -- ═══════════════════════════════════════════════════════════════
 --                     COLETA DE TOKENS (AVANÇADA)
 -- ═══════════════════════════════════════════════════════════════
@@ -1340,11 +1377,11 @@ local function startTokenCollector()
 	
 	task.spawn(function()
 		while TOKEN_COLLECTOR.Enabled and shouldContinue() do
-			-- Na rota em grade, o coletor paralelo alteraria o MoveTo da rota e
-			-- deixaria a caminhada travando. O ToolCollect continua coletando
-			-- normalmente os tokens pelos quais o personagem passa.
+			-- No Route Sweep, tokens são coletados somente ao passar por eles. O
+			-- coletor paralelo não pode emitir outro MoveTo e quebrar a serpentina.
 			local foundToken = false
-			if CONFIG.CollectTokens and CONFIG.FarmMode ~= "Route Sweep" and not collectingToken then
+			local sweepIsActive = CONFIG.FarmMode == "Route Sweep" and not CONFIG.SmartFlowerTargeting
+			if CONFIG.CollectTokens and not sweepIsActive and not collectingToken then
 				foundToken = checkAndCollectTokens()
 			end
 			-- Quando há token, busca o próximo mais cedo; sem token, reduz uso de CPU.
@@ -1522,6 +1559,7 @@ local AUTO_QUEST = {
 
 -- Lê quests ativas e completadas direto do ClientStatCache
 local function getQuestStats()
+	if not INTERNAL_MODULE_ACCESS then return nil end
 	local ok, statCache = pcall(function()
 		return require(game:GetService("ReplicatedStorage")
 			:WaitForChild("Client", 5)
@@ -1593,6 +1631,7 @@ end
 
 -- Verifica o progresso de uma quest ativa usando o módulo Quests do jogo
 local function getQuestProgress(questName)
+	if not INTERNAL_MODULE_ACCESS then return nil end
 	local ok, QuestsModule = pcall(function()
 		return require(game:GetService("ReplicatedStorage")
 			:WaitForChild("Game", 5)
@@ -2126,6 +2165,20 @@ end
 --                  FLAMES & MARKS COLLECTION
 -- ═══════════════════════════════════════════════════════════════
 
+-- Observação assíncrona: itens tocados durante uma faixa são contabilizados
+-- sem pausar o loop que envia o próximo destino da serpentina.
+local PASSAGE_OBSERVATIONS = setmetatable({}, { __mode = "k" })
+local function observePassagePickup(instance, statName)
+	if PASSAGE_OBSERVATIONS[instance] then return end
+	PASSAGE_OBSERVATIONS[instance] = true
+	task.delay(0.3, function()
+		PASSAGE_OBSERVATIONS[instance] = nil
+		if not instance.Parent and RUNTIME.Stats[statName] ~= nil then
+			RUNTIME.Stats[statName] = RUNTIME.Stats[statName] + 1
+		end
+	end)
+end
+
 -- Restaura todas as flags de sistemas para uma inicialização ou parada consistente.
 local function resetAllSystems()
 	releaseToolCollectInput()
@@ -2155,10 +2208,7 @@ local function collectNearbyFlames()
 	-- Só coleta flames próximas (~10 studs) sem desviar do caminho
 	for _, flame in ipairs(flamesFolder:GetChildren()) do
 		if flame:IsA("BasePart") and (root.Position - flame.Position).Magnitude < 10 then
-			task.wait(0.15)
-			if not flame.Parent then
-				RUNTIME.Stats.FlamesCollected = RUNTIME.Stats.FlamesCollected + 1
-			end
+			observePassagePickup(flame, "FlamesCollected")
 		end
 	end
 end
@@ -2176,10 +2226,7 @@ local function collectNearbyMarks()
 	for _, mark in ipairs(marksFolder:GetChildren()) do
 		if mark:IsA("BasePart") and (root.Position - mark.Position).Magnitude < 25 then
 			-- Marcas são coletadas automaticamente ao passar perto
-			task.wait(CONSTANTS.MOVE_CHECK_INTERVAL)
-			if not mark.Parent then
-				RUNTIME.Stats.MarksCollected = RUNTIME.Stats.MarksCollected + 1
-			end
+			observePassagePickup(mark, "MarksCollected")
 		end
 	end
 end
@@ -2324,62 +2371,82 @@ local function findBestPollenArea(position, radius)
 	return bestPos
 end
 
-local function buildFieldRoute(center, size)
+-- Cria faixas completas, e não uma grade de pontos. Cada MoveTo atravessa uma
+-- linha inteira do campo; assim o Humanoid não faz microparadas a cada flor.
+local function buildFieldRoute(center, size, startPosition, fieldFrame)
 	if not size then return {} end
-	local halfX = math.max(2, math.min(CONFIG.FieldRadius, (size.X * 0.5) - 4))
-	local halfZ = math.max(2, math.min(CONFIG.FieldRadius, (size.Z * 0.5) - 4))
-	local route = {}
-	local gridSize = math.clamp(math.floor(CONFIG.GridSize or 3), 3, 10)
+	fieldFrame = fieldFrame or CFrame.new(center)
+	local margin = 4
+	local halfX = math.max(2, math.min(CONFIG.FieldRadius, (size.X * 0.5) - margin))
+	local halfZ = math.max(2, math.min(CONFIG.FieldRadius, (size.Z * 0.5) - margin))
+	local laneCount = math.clamp(math.floor(CONFIG.GridSize or 3), 3, 10)
 
-	for row = 0, gridSize - 1 do
-		local z = gridSize == 1 and 0 or -halfZ + ((halfZ * 2) * row / (gridSize - 1))
-		-- Alternar o sentido das linhas evita que o personagem atravesse o campo inteiro.
-		for step = 0, gridSize - 1 do
-			local column = row % 2 == 0 and step or (gridSize - 1 - step)
-			local x = gridSize == 1 and 0 or -halfX + ((halfX * 2) * column / (gridSize - 1))
-			table.insert(route, center + Vector3.new(x, 0, z))
+	local function makeRoute(fromTop, startOnRight)
+		local route = {}
+		for lane = 0, laneCount - 1 do
+			local progress = lane / (laneCount - 1)
+			local z = fromTop and (halfZ - (halfZ * 2 * progress)) or (-halfZ + (halfZ * 2 * progress))
+			local goRight = (lane % 2 == 0) ~= startOnRight
+			table.insert(route, fieldFrame:PointToWorldSpace(Vector3.new(goRight and halfX or -halfX, 0, z)))
+			table.insert(route, fieldFrame:PointToWorldSpace(Vector3.new(goRight and -halfX or halfX, 0, z)))
 		end
+		return route
 	end
 
-	return route
+	-- Há quatro formas equivalentes de iniciar a serpentina. Escolher a mais
+	-- próxima evita cruzar o campo só para alcançar um ponto inicial fixo.
+	local candidates = {
+		makeRoute(false, false), makeRoute(false, true),
+		makeRoute(true, false), makeRoute(true, true),
+	}
+	local bestRoute, bestDistance = candidates[1], math.huge
+	local origin = startPosition or center
+	for _, route in ipairs(candidates) do
+		local delta = route[1] - origin
+		local distance = Vector3.new(delta.X, 0, delta.Z).Magnitude
+		if distance < bestDistance then
+			bestRoute, bestDistance = route, distance
+		end
+	end
+	return bestRoute
 end
 
 local function collectAtField(fieldObj)
 	local fPos, fSize = getFieldPosition(fieldObj)
 	if not fPos then return end
+	local fieldFrame = getFieldFrame(fieldObj)
 	
 	local lastFlameCheck = tick()
 	local lastMarkCheck = tick()
 	local lastFlowerScan = 0
 	local currentFlowers = {}
 	local currentFlowerIndex = 1
-	local fieldRoute = buildFieldRoute(fPos, fSize)
+	local usesSweepRoute = not CONFIG.SmartFlowerTargeting and CONFIG.FarmMode == "Route Sweep" and fSize ~= nil
+	local initialRoot = getRoot()
+	local fieldRoute = usesSweepRoute and buildFieldRoute(fPos, fSize, initialRoot and initialRoot.Position, fieldFrame) or {}
 	local routeIndex = 1
-	local routeArrivalDistance = 5
-	if CONFIG.FarmMode == "Route Sweep" and fSize then
-		local gridSize = math.clamp(math.floor(CONFIG.GridSize or 3), 3, 10)
-		local halfX = math.max(2, math.min(CONFIG.FieldRadius, (fSize.X * 0.5) - 4))
-		local halfZ = math.max(2, math.min(CONFIG.FieldRadius, (fSize.Z * 0.5) - 4))
-		local pointSpacing = math.min((halfX * 2) / (gridSize - 1), (halfZ * 2) / (gridSize - 1))
-		routeArrivalDistance = math.clamp(pointSpacing * 0.3, 1.25, 4)
-	end
+	local routeArrivalDistance = 3
 	
-	-- Primeiro escaneamento
-	currentFlowers = findFlowersInField(fieldObj)
-	lastFlowerScan = tick()
+	-- Route Sweep não precisa escanear todas as flores ou tokens: ele cobre o
+	-- campo inteiro. Pular essas buscas reduz picos de CPU e deixa o andar liso.
+	if not usesSweepRoute then
+		currentFlowers = findFlowersInField(fieldObj)
+		lastFlowerScan = tick()
+	end
 	
 	-- WATCHDOG: detecta se player foi muito longe do campo
 	local maxFieldDistance = CONFIG.FieldRadius + 30 -- Tolerância extra
 	local consecutiveFailedMoves = 0
-	local maxConsecutiveFailures = 3 -- Se falhar 3 movimentos, sai
+	local maxConsecutiveFailures = 3 -- Após 3 falhas, recalcula a rota do ponto atual
 	
 	while shouldContinue() and CONFIG.SelectedField == fieldObj do
 		updateBoosts()
 		updateEventTracker()
 		useHotbarItems()
 		if checkBossEvents() then
-			-- The boss routine completed; refresh field data before normal farming resumes.
-			currentFlowers, currentFlowerIndex, lastFlowerScan = findFlowersInField(fieldObj), 1, tick()
+			if not usesSweepRoute then
+				currentFlowers, currentFlowerIndex, lastFlowerScan = findFlowersInField(fieldObj), 1, tick()
+			end
 		end
 		local pollenPercent = safeGetPollenPercent()
 		if pollenPercent >= CONFIG.ConvertAt then
@@ -2410,71 +2477,64 @@ local function collectAtField(fieldObj)
 			lastMarkCheck = currentTime
 		end
 		
-		-- Re-escaneia flores a cada 5 segundos para pegar NOVAS flores melhores
-		if currentTime - lastFlowerScan > 20 then
+		-- Re-escaneia flores somente no modo que as usa como alvo.
+		if not usesSweepRoute and currentTime - lastFlowerScan > 20 then
 			currentFlowers = findFlowersInField(fieldObj)
 			currentFlowerIndex = 1
 			lastFlowerScan = currentTime
 		end
 		
-		-- PRIORIDADE 1: Vai para a MELHOR flor disponível (maior polen)
 		local targetPos = nil
-		
-		if #currentFlowers > 0 and currentFlowerIndex <= #currentFlowers then
-			local flower = CONFIG.SmartFlowerTargeting and getNextBestFlower(currentFlowers, root and root.Position or fPos) or currentFlowers[currentFlowerIndex]
-			
-			-- Verifica se a flor ainda existe
-			if flower and flower.Part.Parent then
-				targetPos = flower.Position + Vector3.new(0, CONFIG.CollectHeight, 0)
-			elseif not CONFIG.SmartFlowerTargeting then
-				-- Flor sumiu, vai para a próxima MELHOR
-				currentFlowerIndex = currentFlowerIndex + 1
+		if usesSweepRoute and #fieldRoute > 0 then
+			targetPos = fieldRoute[routeIndex]
+		else
+			if #currentFlowers > 0 and currentFlowerIndex <= #currentFlowers then
+				local flower = CONFIG.SmartFlowerTargeting and getNextBestFlower(currentFlowers, root and root.Position or fPos) or currentFlowers[currentFlowerIndex]
+				if flower and flower.Part.Parent then
+					targetPos = flower.Position + Vector3.new(0, CONFIG.CollectHeight, 0)
+				elseif not CONFIG.SmartFlowerTargeting then
+					currentFlowerIndex = currentFlowerIndex + 1
+				end
 			end
-		end
-		
-		-- PRIORIDADE 2: Se nao tem flores, procura AREA com MAIS polen no chao
-		if not targetPos then
-			local bestArea = findBestPollenArea(fPos, CONFIG.FieldRadius)
-			if bestArea then
-				targetPos = bestArea + Vector3.new(0, CONFIG.CollectHeight, 0)
+			if not targetPos then
+				local bestArea = findBestPollenArea(fPos, CONFIG.FieldRadius)
+				targetPos = (bestArea or fPos) + Vector3.new(0, CONFIG.CollectHeight, 0)
 			end
-		end
-		
-		-- PRIORIDADE 3: Centro do campo (ultima opcao)
-		if not targetPos then
-			targetPos = fPos + Vector3.new(0, CONFIG.CollectHeight, 0)
 		end
 
-		-- Smart targeting deliberately takes precedence over the predictable grid route.
-		if not CONFIG.SmartFlowerTargeting and CONFIG.FarmMode == "Route Sweep" and #fieldRoute > 0 then
-			local root = getRoot()
-			local routeTarget = fieldRoute[routeIndex]
-			if root and (root.Position - routeTarget).Magnitude <= 7 then
-				routeIndex = (routeIndex % #fieldRoute) + 1
-				routeTarget = fieldRoute[routeIndex]
-			end
-			targetPos = routeTarget + Vector3.new(0, CONFIG.CollectHeight, 0)
-		end
-
-		-- Move para a posicao OTIMA e verifica se conseguiu
-		local moveSuccess = moveTo(targetPos, (not CONFIG.SmartFlowerTargeting and CONFIG.FarmMode == "Route Sweep") and routeArrivalDistance or nil)
+		local moveSuccess = moveTo(targetPos, usesSweepRoute and routeArrivalDistance or nil)
 		
 		if not moveSuccess then
 			-- Movimento falhou (player parado, obstáculo ou movimento manual)
 			consecutiveFailedMoves = consecutiveFailedMoves + 1
-			if consecutiveFailedMoves >= maxConsecutiveFailures then
-				-- Muitas falhas consecutivas - sai e reinicia
+			if usesSweepRoute and #fieldRoute > 0 then
+				routeIndex = (routeIndex % #fieldRoute) + 1
+				if consecutiveFailedMoves >= maxConsecutiveFailures then
+					-- Recalcula a partir da posição atual, sem encerrar o farm.
+					local currentRoot = getRoot()
+					fieldRoute = buildFieldRoute(fPos, fSize, currentRoot and currentRoot.Position, fieldFrame)
+					routeIndex, consecutiveFailedMoves = 1, 0
+				end
+			elseif consecutiveFailedMoves >= maxConsecutiveFailures then
 				break
 			end
 		else
-			-- Movimento OK, reseta contador
 			consecutiveFailedMoves = 0
+			if usesSweepRoute and #fieldRoute > 0 then
+				routeIndex = routeIndex + 1
+				if routeIndex > #fieldRoute then
+					local currentRoot = getRoot()
+					fieldRoute = buildFieldRoute(fPos, fSize, currentRoot and currentRoot.Position, fieldFrame)
+					routeIndex = 1
+				end
+			end
 		end
 		
 		if not CONFIG.Enabled then return end
 		
-		-- Fica coletando por um tempo antes de reavaliação
-		task.wait(CONFIG.CollectInterval) 
+		-- Nas faixas, manda o próximo destino quase imediatamente para que a
+		-- transição na extremidade seja uma curva, não uma parada visível.
+		task.wait(usesSweepRoute and 0.02 or CONFIG.CollectInterval)
 	end
 end
 
@@ -2501,7 +2561,8 @@ local function automationLoop()
 	TOOL_COLLECT.Enabled = true
 	enableToolCollect()
 	startAntiDisconnect()
-	startSpeedEnforcer()
+	-- Não force WalkSpeed: buffs, solo e estados do Humanoid são controlados pelo
+	-- jogo. Forçá-lo a cada 0,1 s disputava esse controle e causava engasgos.
 	
 	-- Inicia o coletor de tokens contínuo
 	TOKEN_COLLECTOR.Enabled = true
@@ -2594,7 +2655,7 @@ local function automationLoop()
 				-- MCP: ajusta Y pelo chão real antes de teleportar (como o MacroSystem faz)
 				local adjustedPos = getAdjustedFieldPosition(CONFIG.SelectedField) or (fPos + Vector3.new(0, 3, 0))
 				invalidatePathCache()
-				teleportToSelectedField(adjustedPos)
+				travelToSelectedField(adjustedPos)
 				
 				if shouldContinue() then
 					-- Depois ANDA normalmente no campo
@@ -2811,6 +2872,25 @@ FarmTab:CreateToggle({
 	end,
 })
 
+FarmTab:CreateToggle({
+	Name = "🖥️ Background Route Mode",
+	CurrentValue = CONFIG.BackgroundMode,
+	Flag = "BackgroundRouteMode",
+	Callback = function(Value)
+		CONFIG.BackgroundMode = Value
+		if Value then
+			-- Solta imediatamente qualquer clique que já estivesse mantido antes
+			-- de liberar o usuário para trabalhar em outra janela.
+			releaseToolCollectInput()
+		end
+		safeNotify(
+			Value and "🖥️ Modo Background ON" or "🖥️ Modo Background OFF",
+			Value and "Rota continua; cliques, teleporte e atividade virtual ficam pausados" or "Coleta por clique foi reativada",
+			4
+		)
+	end,
+})
+
 FarmTab:CreateDropdown({
 	Name = "Farm Movement Mode",
 	Options = {"Smart Flowers", "Route Sweep"},
@@ -2825,10 +2905,10 @@ FarmTab:CreateDropdown({
 
 
 FarmTab:CreateSlider({
-	Name = "Route Grid Size",
+	Name = "Route Sweep Lanes",
 	Range = {3, 10},
 	Increment = 1,
-	Suffix = " x grid",
+	Suffix = " lanes",
 	CurrentValue = CONFIG.GridSize,
 	Flag = "RouteGridSize",
 	Callback = function(Value)
@@ -3029,7 +3109,12 @@ SpecialTab:CreateToggle({
 	CurrentValue = false,
 	Flag = "AutoQuestToggle",
 	Callback = function(Value)
-		AUTO_QUEST.Enabled = Value
+		-- Requer ClientStatCache/Quests, que não podem ser carregados neste contexto.
+		AUTO_QUEST.Enabled = Value and INTERNAL_MODULE_ACCESS
+		if Value and not INTERNAL_MODULE_ACCESS then
+			safeNotify("📋 Auto Quest indisponível", "Este recurso exige módulos internos do jogo e foi bloqueado para evitar erros.", 4)
+			return
+		end
 		if Value and CONFIG.Enabled then
 			startAutoQuest()
 		end
@@ -3226,11 +3311,15 @@ AdvancedTab:CreateToggle({
 })
 
 AdvancedTab:CreateToggle({
-	Name = "🎒 Auto Use Hotbar Items",
-	CurrentValue = true, -- ATIVADO por padrão
+	Name = "🎒 Auto Use Hotbar Items (indisponível)",
+	CurrentValue = false,
 	Flag = "AutoHotbarItems",
 	Callback = function(Value)
-		HOTBAR_SYSTEM.Enabled = Value
+		HOTBAR_SYSTEM.Enabled = Value and INTERNAL_MODULE_ACCESS
+		if Value and not INTERNAL_MODULE_ACCESS then
+			safeNotify("🎒 Hotbar indisponível", "Este recurso exige módulos internos do jogo e foi bloqueado para evitar erros.", 4)
+			return
+		end
 		safeNotify(
 			Value and "🎒 Hotbar Items ON" or "🎒 Hotbar Items OFF",
 			Value and "Itens do hotbar serão usados automaticamente" or "Hotbar desativado",
@@ -3669,14 +3758,6 @@ InfoTab:CreateButton({
 		
 		-- Remove da sessão global
 		_G.BSSAutoFarmSession = nil
-		
-		-- Restaura WalkSpeed original
-		pcall(function()
-			local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
-			if humanoid then
-				humanoid.WalkSpeed = 16 -- velocidade padrão do BSS
-			end
-		end)
 		
 		print("[BSS AutoFarm] ✅ Script unloaded successfully!")
 		print("[BSS AutoFarm] All systems stopped and GUI removed.")
