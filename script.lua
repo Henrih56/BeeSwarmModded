@@ -1118,42 +1118,42 @@ local function useHotbarItems()
 		if itemName and itemName ~= "nil" and not HOTBAR_SYSTEM.Blacklist[itemName] then
 			-- Micro-Converter: controle especial
 			local isMicroConverter = itemName == "Micro-Converter" or itemName == "MicroConverter"
+			local shouldUse = true
 			
 			if isMicroConverter then
 				-- Só usa se estiver habilitado E tiver pólen suficiente
 				if not HOTBAR_SYSTEM.UseMicroConverter then
-					goto continue
-				end
-				if pollenPct < HOTBAR_SYSTEM.MicroConverterMinPollen then
-					goto continue
+					shouldUse = false
+				elseif pollenPct < HOTBAR_SYSTEM.MicroConverterMinPollen then
+					shouldUse = false
 				end
 			end
 			
-			-- Usa o item
-			local success = false
-			pcall(function()
-				-- Busca o tipo do item via PlayerActives
-				local playerActives = require(game:GetService("ReplicatedStorage")
-					:WaitForChild("Game", 5)
-					:WaitForChild("ItemsAndEconomy", 5)
-					:WaitForChild("PlayerActives", 5))
-				local item = playerActives.Get(itemName)
-				if item then
-					evts.ClientCall("PlayerActivesCommand", item.Name, item.Type)
-					success = true
-					-- Log específico para Micro-Converter
-					if isMicroConverter then
-						print(string.format("[BSS AutoFarm] 🔄 Micro-Converter usado! (Pólen: %.1f%%)", pollenPct))
-						-- Notificação discreta apenas para Micro-Converter
-						safeNotify("🔄 Micro-Converter", string.format("Convertendo pólen (%.1f%%)", pollenPct), 2)
+			-- Usa o item se passou nas verificações
+			if shouldUse then
+				local success = false
+				pcall(function()
+					-- Busca o tipo do item via PlayerActives
+					local playerActives = require(game:GetService("ReplicatedStorage")
+						:WaitForChild("Game", 5)
+						:WaitForChild("ItemsAndEconomy", 5)
+						:WaitForChild("PlayerActives", 5))
+					local item = playerActives.Get(itemName)
+					if item then
+						evts.ClientCall("PlayerActivesCommand", item.Name, item.Type)
+						success = true
+						-- Log específico para Micro-Converter
+						if isMicroConverter then
+							print(string.format("[BSS AutoFarm] 🔄 Micro-Converter usado! (Pólen: %.1f%%)", pollenPct))
+							-- Notificação discreta apenas para Micro-Converter
+							safeNotify("🔄 Micro-Converter", string.format("Convertendo pólen (%.1f%%)", pollenPct), 2)
+						end
 					end
+				end)
+				if not success and isMicroConverter then
+					print("[BSS AutoFarm] ⚠️ Falha ao usar Micro-Converter - verifique se está na hotbar")
 				end
-			end)
-			if not success and isMicroConverter then
-				print("[BSS AutoFarm] ⚠️ Falha ao usar Micro-Converter - verifique se está na hotbar")
 			end
-			
-			::continue::
 		end
 	end
 end
