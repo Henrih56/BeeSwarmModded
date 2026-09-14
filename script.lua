@@ -1079,7 +1079,7 @@ end
 -- MCP: usa itens do hotbar via PlayerActivesCommand (descoberto no MacroSystem)
 -- Isso ativa automaticamente itens como Sprinkler, Field Booster, etc.
 local HOTBAR_SYSTEM = {
-	Enabled = false,
+	Enabled = true, -- ATIVADO por padrão para usar Micro-Converter automaticamente
 	LastUse = 0,
 	Interval = 5, -- verifica a cada 5s (mesmo intervalo do MacroSystem)
 	-- Itens que NÃO devem ser usados automaticamente pelo hotbar
@@ -1087,6 +1087,9 @@ local HOTBAR_SYSTEM = {
 		["Sprinkler Builder"] = true, -- só usa via AutoSprinkler
 		["SprinklerBuilder"]  = true,
 	},
+	-- Controle específico do Micro-Converter
+	UseMicroConverter = true,
+	MicroConverterMinPollen = 5, -- % mínimo de pólen para usar
 }
 
 local function useHotbarItems()
@@ -1113,21 +1116,44 @@ local function useHotbarItems()
 
 	for _, itemName in ipairs(stats.Settings.PlayerActivesBar) do
 		if itemName and itemName ~= "nil" and not HOTBAR_SYSTEM.Blacklist[itemName] then
-			-- Micro-Converter só usa se tiver pelo menos 5% de pollen
+			-- Micro-Converter: controle especial
 			local isMicroConverter = itemName == "Micro-Converter" or itemName == "MicroConverter"
-			if not isMicroConverter or pollenPct >= 5 then
-				pcall(function()
-					-- Busca o tipo do item via PlayerActives
-					local playerActives = require(game:GetService("ReplicatedStorage")
-						:WaitForChild("Game", 5)
-						:WaitForChild("ItemsAndEconomy", 5)
-						:WaitForChild("PlayerActives", 5))
-					local item = playerActives.Get(itemName)
-					if item then
-						evts.ClientCall("PlayerActivesCommand", item.Name, item.Type)
-					end
-				end)
+			
+			if isMicroConverter then
+				-- Só usa se estiver habilitado E tiver pólen suficiente
+				if not HOTBAR_SYSTEM.UseMicroConverter then
+					goto continue
+				end
+				if pollenPct < HOTBAR_SYSTEM.MicroConverterMinPollen then
+					goto continue
+				end
 			end
+			
+			-- Usa o item
+			local success = false
+			pcall(function()
+				-- Busca o tipo do item via PlayerActives
+				local playerActives = require(game:GetService("ReplicatedStorage")
+					:WaitForChild("Game", 5)
+					:WaitForChild("ItemsAndEconomy", 5)
+					:WaitForChild("PlayerActives", 5))
+				local item = playerActives.Get(itemName)
+				if item then
+					evts.ClientCall("PlayerActivesCommand", item.Name, item.Type)
+					success = true
+					-- Log específico para Micro-Converter
+					if isMicroConverter then
+						print(string.format("[BSS AutoFarm] 🔄 Micro-Converter usado! (Pólen: %.1f%%)", pollenPct))
+						-- Notificação discreta apenas para Micro-Converter
+						safeNotify("🔄 Micro-Converter", string.format("Convertendo pólen (%.1f%%)", pollenPct), 2)
+					end
+				end
+			end)
+			if not success and isMicroConverter then
+				print("[BSS AutoFarm] ⚠️ Falha ao usar Micro-Converter - verifique se está na hotbar")
+			end
+			
+			::continue::
 		end
 	end
 end
@@ -3208,7 +3234,7 @@ AdvancedTab:CreateToggle({
 
 AdvancedTab:CreateToggle({
 	Name = "🎒 Auto Use Hotbar Items",
-	CurrentValue = false,
+	CurrentValue = true, -- ATIVADO por padrão
 	Flag = "AutoHotbarItems",
 	Callback = function(Value)
 		HOTBAR_SYSTEM.Enabled = Value
@@ -3217,6 +3243,32 @@ AdvancedTab:CreateToggle({
 			Value and "Itens do hotbar serão usados automaticamente" or "Hotbar desativado",
 			3
 		)
+	end,
+})
+
+AdvancedTab:CreateToggle({
+	Name = "🔄 Auto Micro-Converter",
+	CurrentValue = true, -- ATIVADO por padrão
+	Flag = "AutoMicroConverter",
+	Callback = function(Value)
+		HOTBAR_SYSTEM.UseMicroConverter = Value
+		safeNotify(
+			Value and "🔄 Micro-Converter ON" or "🔄 Micro-Converter OFF",
+			Value and "Micro-Converter será usado automaticamente quando estiver na hotbar" or "Micro-Converter desativado",
+			3
+		)
+	end,
+})
+
+AdvancedTab:CreateSlider({
+	Name = "Micro-Converter Min Pollen",
+	Range = {1, 20},
+	Increment = 1,
+	Suffix = "%",
+	CurrentValue = 5,
+	Flag = "MicroConverterMinPollen",
+	Callback = function(Value)
+		HOTBAR_SYSTEM.MicroConverterMinPollen = Value
 	end,
 })
 
