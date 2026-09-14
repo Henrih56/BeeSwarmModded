@@ -1097,7 +1097,6 @@ local function useHotbarItems()
 	if tick() - HOTBAR_SYSTEM.LastUse < HOTBAR_SYSTEM.Interval then return end
 	HOTBAR_SYSTEM.LastUse = tick()
 
-	-- Precisa do ClientStatCache para ler o PlayerActivesBar
 	local ok, statCache = pcall(function()
 		return require(game:GetService("ReplicatedStorage")
 			:WaitForChild("Client", 5)
@@ -1116,12 +1115,10 @@ local function useHotbarItems()
 
 	for _, itemName in ipairs(stats.Settings.PlayerActivesBar) do
 		if itemName and itemName ~= "nil" and not HOTBAR_SYSTEM.Blacklist[itemName] then
-			-- Micro-Converter: controle especial
 			local isMicroConverter = itemName == "Micro-Converter" or itemName == "MicroConverter"
 			local shouldUse = true
 			
 			if isMicroConverter then
-				-- Só usa se estiver habilitado E tiver pólen suficiente
 				if not HOTBAR_SYSTEM.UseMicroConverter then
 					shouldUse = false
 				elseif pollenPct < HOTBAR_SYSTEM.MicroConverterMinPollen then
@@ -1129,11 +1126,9 @@ local function useHotbarItems()
 				end
 			end
 			
-			-- Usa o item se passou nas verificações
 			if shouldUse then
 				local success = false
 				pcall(function()
-					-- Busca o tipo do item via PlayerActives
 					local playerActives = require(game:GetService("ReplicatedStorage")
 						:WaitForChild("Game", 5)
 						:WaitForChild("ItemsAndEconomy", 5)
@@ -1142,10 +1137,8 @@ local function useHotbarItems()
 					if item then
 						evts.ClientCall("PlayerActivesCommand", item.Name, item.Type)
 						success = true
-						-- Log específico para Micro-Converter
 						if isMicroConverter then
 							print(string.format("[BSS AutoFarm] 🔄 Micro-Converter usado! (Pólen: %.1f%%)", pollenPct))
-							-- Notificação discreta apenas para Micro-Converter
 							safeNotify("🔄 Micro-Converter", string.format("Convertendo pólen (%.1f%%)", pollenPct), 2)
 						end
 					end
