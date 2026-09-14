@@ -3327,6 +3327,219 @@ local ToolCooldownSlider = AdvancedTab:CreateSlider({
 
 
 -- ═══════════════════════════════════════════════════════════════
+--                         TAB: REMOTE COMMANDS
+-- ═══════════════════════════════════════════════════════════════
+
+local RemoteTab = Window:CreateTab("🔧 Remote", 4483362458)
+
+RemoteTab:CreateSection("🎯 Field Commands")
+
+RemoteTab:CreateButton({
+	Name = "🔥 Boost Field (1 hour)",
+	Callback = function()
+		local evts = getBSSEvents()
+		if evts and CONFIG.SelectedField then
+			pcall(function()
+				evts.ClientCall("PlayerActivesCommand", "Field Booster", "Consumable")
+			end)
+			safeNotify("🔥 Field Booster", "Tentando usar Field Booster no campo atual", 3)
+		else
+			safeNotify("⚠️ Error", "Selecione um campo primeiro!", 3)
+		end
+	end,
+})
+
+RemoteTab:CreateButton({
+	Name = "🌸 Place Sprinkler",
+	Callback = function()
+		if CONFIG.SelectedField then
+			local success, msg = placeSprinklerAtFieldCenter(CONFIG.SelectedField)
+			safeNotify(success and "✅ Sprinkler" or "⚠️ Error", msg or "Unknown", 3)
+		else
+			safeNotify("⚠️ Error", "Selecione um campo primeiro!", 3)
+		end
+	end,
+})
+
+RemoteTab:CreateButton({
+	Name = "🍀 Use Blue Field Dice",
+	Callback = function()
+		local evts = getBSSEvents()
+		if evts then
+			pcall(function()
+				evts.ClientCall("PlayerActivesCommand", "Blue Field Dice", "Consumable")
+			end)
+			safeNotify("🍀 Blue Field Dice", "Tentando usar Blue Field Dice", 3)
+		end
+	end,
+})
+
+RemoteTab:CreateButton({
+	Name = "🌹 Use Red Field Dice",
+	Callback = function()
+		local evts = getBSSEvents()
+		if evts then
+			pcall(function()
+				evts.ClientCall("PlayerActivesCommand", "Red Field Dice", "Consumable")
+			end)
+			safeNotify("🌹 Red Field Dice", "Tentando usar Red Field Dice", 3)
+		end
+	end,
+})
+
+RemoteTab:CreateSection("⚡ Boost Commands")
+
+RemoteTab:CreateButton({
+	Name = "🔵 Blue Boost",
+	Callback = function()
+		local evts = getBSSEvents()
+		if evts then
+			pcall(function()
+				evts.ClientCall("PlayerActivesCommand", "Blue Boost", "Consumable")
+			end)
+			safeNotify("🔵 Blue Boost", "Ativando Blue Boost", 2)
+		end
+	end,
+})
+
+RemoteTab:CreateButton({
+	Name = "🔴 Red Boost",
+	Callback = function()
+		local evts = getBSSEvents()
+		if evts then
+			pcall(function()
+				evts.ClientCall("PlayerActivesCommand", "Red Boost", "Consumable")
+			end)
+			safeNotify("🔴 Red Boost", "Ativando Red Boost", 2)
+		end
+	end,
+})
+
+RemoteTab:CreateButton({
+	Name = "⚪ Mountain Boost",
+	Callback = function()
+		local evts = getBSSEvents()
+		if evts then
+			pcall(function()
+				evts.ClientCall("PlayerActivesCommand", "Mountain Boost", "Consumable")
+			end)
+			safeNotify("⚪ Mountain Boost", "Ativando Mountain Boost", 2)
+		end
+	end,
+})
+
+RemoteTab:CreateButton({
+	Name = "🌟 Super Smoothie",
+	Callback = function()
+		local evts = getBSSEvents()
+		if evts then
+			pcall(function()
+				evts.ClientCall("PlayerActivesCommand", "Super Smoothie", "Consumable")
+			end)
+			safeNotify("🌟 Super Smoothie", "Usando Super Smoothie", 2)
+		end
+	end,
+})
+
+RemoteTab:CreateSection("🎁 Special Items")
+
+RemoteTab:CreateButton({
+	Name = "🔄 Use Micro-Converter",
+	Callback = function()
+		local evts = getBSSEvents()
+		if evts then
+			local pollenPct = safeGetPollenPercent()
+			if pollenPct < 1 then
+				safeNotify("⚠️ Error", "Pólen muito baixo! Colete mais pólen primeiro.", 3)
+				return
+			end
+			pcall(function()
+				evts.ClientCall("PlayerActivesCommand", "Micro-Converter", "Consumable")
+			end)
+			safeNotify("🔄 Micro-Converter", string.format("Convertendo pólen (%.1f%%)", pollenPct), 3)
+		end
+	end,
+})
+
+RemoteTab:CreateButton({
+	Name = "🎉 Use Honeystorm",
+	Callback = function()
+		local evts = getBSSEvents()
+		if evts then
+			pcall(function()
+				evts.ClientCall("PlayerActivesCommand", "Honeystorm", "Consumable")
+			end)
+			safeNotify("🎉 Honeystorm", "Ativando Honeystorm!", 3)
+		end
+	end,
+})
+
+RemoteTab:CreateButton({
+	Name = "🌪️ Use Tornado",
+	Callback = function()
+		local evts = getBSSEvents()
+		if evts then
+			pcall(function()
+				evts.ClientCall("PlayerActivesCommand", "Tornado", "Consumable")
+			end)
+			safeNotify("🌪️ Tornado", "Ativando Tornado!", 2)
+		end
+	end,
+})
+
+RemoteTab:CreateButton({
+	Name = "☁️ Use Cloud Vial",
+	Callback = function()
+		local evts = getBSSEvents()
+		if evts then
+			pcall(function()
+				evts.ClientCall("PlayerActivesCommand", "Cloud Vial", "Consumable")
+			end)
+			safeNotify("☁️ Cloud Vial", "Usando Cloud Vial", 2)
+		end
+	end,
+})
+
+RemoteTab:CreateSection("🐝 Hive Commands")
+
+RemoteTab:CreateButton({
+	Name = "🍯 Convert at Hive",
+	Callback = function()
+		CONFIG.Enabled = false
+		task.wait(0.5)
+		convertAtHive()
+		task.wait(1)
+		safeNotify("✅ Conversion Complete", "Pólen convertido em mel!", 3)
+	end,
+})
+
+RemoteTab:CreateButton({
+	Name = "🎲 Royal Jelly",
+	Callback = function()
+		local evts = getBSSEvents()
+		if evts then
+			pcall(function()
+				evts.ClientCall("PlayerActivesCommand", "Royal Jelly", "Consumable")
+			end)
+			safeNotify("🎲 Royal Jelly", "Usando Royal Jelly", 2)
+		end
+	end,
+})
+
+RemoteTab:CreateButton({
+	Name = "⭐ Star Jelly",
+	Callback = function()
+		local evts = getBSSEvents()
+		if evts then
+			pcall(function()
+				evts.ClientCall("PlayerActivesCommand", "Star Jelly", "Consumable")
+			end)
+			safeNotify("⭐ Star Jelly", "Usando Star Jelly", 2)
+		end
+	end,
+})
+
+-- ═══════════════════════════════════════════════════════════════
 --                         TAB: INFO
 -- ═══════════════════════════════════════════════════════════════
 
