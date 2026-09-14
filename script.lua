@@ -862,7 +862,9 @@ local function moveToImpl(destination, arrivalDistance)
 
 	local start = tick()
 	local initialRemaining = horizontalDistance(root.Position, destination)
-	local maxTravelTime = math.max(4, (initialRemaining / math.max(humanoid.WalkSpeed, 8)) * 2.5 + 1.5)
+	-- Margem generosa para buffs acabarem no meio da faixa. O detector de
+	-- progresso abaixo ainda interrompe rápido se houver bloqueio real.
+	local maxTravelTime = math.max(8, (initialRemaining / math.max(humanoid.WalkSpeed, 8)) * 4 + 3)
 	local bestRemaining = initialRemaining
 	local lastProgressAt = start
 
@@ -2425,6 +2427,8 @@ local function collectAtField(fieldObj)
 	local initialRoot = getRoot()
 	local fieldRoute = usesSweepRoute and buildFieldRoute(fPos, fSize, initialRoot and initialRoot.Position, fieldFrame) or {}
 	local routeIndex = 1
+	-- A distância de virada é calculada a cada faixa com a velocidade atual.
+	-- Isso permite mandar o próximo MoveTo antes de o Humanoid frear no fim.
 	local routeArrivalDistance = 3
 	
 	-- Route Sweep não precisa escanear todas as flores ou tokens: ele cobre o
@@ -2502,7 +2506,15 @@ local function collectAtField(fieldObj)
 			end
 		end
 
-		local moveSuccess = moveTo(targetPos, usesSweepRoute and routeArrivalDistance or nil)
+		local arrivalDistance = nil
+		if usesSweepRoute then
+			local humanoid = root and root.Parent and root.Parent:FindFirstChildOfClass("Humanoid")
+			local walkSpeed = humanoid and humanoid.WalkSpeed or 16
+			-- Em velocidades altas, o intervalo normal de atualização faria o
+			-- personagem chegar, frear e só então receber a próxima faixa.
+			arrivalDistance = math.clamp(walkSpeed * 0.12, routeArrivalDistance, 7)
+		end
+		local moveSuccess = moveTo(targetPos, arrivalDistance)
 		
 		if not moveSuccess then
 			-- Movimento falhou (player parado, obstáculo ou movimento manual)
@@ -2532,9 +2544,12 @@ local function collectAtField(fieldObj)
 		
 		if not CONFIG.Enabled then return end
 		
-		-- Nas faixas, manda o próximo destino quase imediatamente para que a
-		-- transição na extremidade seja uma curva, não uma parada visível.
-		task.wait(usesSweepRoute and 0.02 or CONFIG.CollectInterval)
+		-- No Route Sweep, o próprio MoveTo já cede enquanto caminha. Não espere
+		-- novamente ao trocar de faixa: o próximo destino deve chegar no mesmo
+		-- ciclo para o Humanoid não parar na extremidade.
+		if not usesSweepRoute then
+			task.wait(CONFIG.CollectInterval)
+		end
 	end
 end
 
