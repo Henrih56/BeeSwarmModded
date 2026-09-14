@@ -116,6 +116,44 @@ local DELTA_FUNCTIONS = {
 	HasHookFunction = type(hookfunction) == "function",
 }
 
+-- Detecta executor atual para otimizações específicas
+local EXECUTOR_INFO = {
+	Name = identifyexecutor and identifyexecutor() or "Unknown",
+	IsXeno = false,
+	IsDelta = false,
+	IsWave = false,
+	IsSynapse = false,
+}
+
+-- Detecta Xeno pela existência de suas funções específicas
+if getgenv and getgenv().Xeno or getgenv and getgenv().xeno then
+	EXECUTOR_INFO.Name = "Xeno"
+	EXECUTOR_INFO.IsXeno = true
+elseif EXECUTOR_INFO.Name:lower():find("xeno") then
+	EXECUTOR_INFO.IsXeno = true
+elseif EXECUTOR_INFO.Name:lower():find("delta") then
+	EXECUTOR_INFO.IsDelta = true
+elseif EXECUTOR_INFO.Name:lower():find("wave") then
+	EXECUTOR_INFO.IsWave = true
+elseif EXECUTOR_INFO.Name:lower():find("synapse") then
+	EXECUTOR_INFO.IsSynapse = true
+end
+
+-- Log de detecção do executor
+print("[BSS AutoFarm] Executor detectado: " .. EXECUTOR_INFO.Name)
+if EXECUTOR_INFO.IsXeno then
+	print("[BSS AutoFarm] ✅ Otimizações Xeno ativadas! (clicks repetidos)")
+elseif EXECUTOR_INFO.IsDelta then
+	print("[BSS AutoFarm] ✅ Otimizações Delta ativadas! (botão mantido)")
+end
+pcall(function()
+	game.StarterGui:SetCore("SendNotification", {
+		Title = "BSS AutoFarm - " .. EXECUTOR_INFO.Name;
+		Text = "Otimizações específicas aplicadas!";
+		Duration = 4;
+	})
+end)
+
 -- Delta Anti-Detection System
 local DELTA_ANTI_DETECT = {
 	Enabled = true,
@@ -217,7 +255,26 @@ local function fireToolCollect()
 	local mousePosition = UserInputService:GetMouseLocation()
 	if hasInteractiveUiAt(mousePosition.X, mousePosition.Y) then return false end
 
-	if DELTA_FUNCTIONS.HasMousePress then
+	-- XENO EXECUTOR: método específico mais confiável
+	if EXECUTOR_INFO.IsXeno then
+		-- Xeno funciona melhor com clicks repetidos (não mantém press)
+		if DELTA_FUNCTIONS.HasMouseClick then
+			local ok = pcall(mouse1click)
+			if ok then return true end
+		end
+		-- Fallback para Xeno: tenta press/release rápido
+		if DELTA_FUNCTIONS.HasMousePress then
+			local ok = pcall(function()
+				mouse1press()
+				task.wait(0.01) -- Delay mínimo
+				mouse1release()
+			end)
+			if ok then return true end
+		end
+	end
+
+	-- DELTA E OUTROS: mantém botão pressionado
+	if DELTA_FUNCTIONS.HasMousePress and not EXECUTOR_INFO.IsXeno then
 		local ok = pcall(mouse1press)
 		if ok then
 			COLLECT_INPUT.Held = true
@@ -241,8 +298,12 @@ local function fireToolCollect()
 
 	local ok = pcall(function()
 		VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
+		if not EXECUTOR_INFO.IsXeno then
+			-- Xeno funciona melhor SEM manter o botão pressionado
+			VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
+		end
 	end)
-	if ok then
+	if ok and not EXECUTOR_INFO.IsXeno then
 		COLLECT_INPUT.Held = true
 		COLLECT_INPUT.Method = "virtual"
 		COLLECT_INPUT.X, COLLECT_INPUT.Y = x, y
@@ -351,6 +412,9 @@ local FLOWER_CACHE = {
 
 local CONFIG
 local BALLOON_FARM
+local canHoldCollector = function()
+	return false
+end
 
 -- Centraliza a condição de continuidade das automações da sessão atual.
 local function shouldContinue()
@@ -405,6 +469,15 @@ local function enableToolCollect()
 	
 	task.spawn(function()
 		while TOOL_COLLECT.Enabled and shouldContinue() do
+			-- A coletora fica equipada permanentemente; a única condição para
+			-- segurarmos o botão é estar realmente dentro do campo selecionado.
+			if not canHoldCollector() then
+				releaseToolCollectInput()
+				TOOL_COLLECT.LastError = "Aguardando chegada ao campo selecionado"
+				task.wait(CONSTANTS.TOOL_COLLECT_LOOP_INTERVAL)
+				continue
+			end
+
 			-- MCP: respeita cooldown mínimo real do jogo (0.18s)
 			updateGameCooldown()
 			-- Delta: adiciona pequena variação para humanizar
@@ -479,6 +552,8 @@ CONFIG = {
 	CollectHeight = 3,
 	CollectInterval = 0.1,
 	ConvertAt = 95,
+	AutoConvert = true, -- NOVO: quando false, não converte automaticamente
+	TeleportToField = false, -- NOVO: quando true, teleporta até o campo (não anda)
 	TeleportMode = false, -- quando true: teleporta em tudo (campo, tokens, colmeia)
 	AutoSprinkler = false,
 	
@@ -604,13 +679,19 @@ end
 local getOrComputePath
 local invalidatePathCache
 
--- Ir ao campo/colmeia: teleporta se TeleportMode ligado, senão CFrame direto
--- (para distâncias longas sempre usamos teleporte — andar 200 studs é perda de tempo)
--- Ir ao campo/colmeia: usa pathfinding para distâncias longas com obstáculos.
--- Para modo teleporte, vai direto via CFrame.
+-- Ir ao campo/colmeia: 
+-- - Se TeleportToField estiver ligado: TELEPORTA até o destino (campo ou colmeia)
+-- - Se não: usa pathfinding (anda até lá evitando obstáculos)
+-- TeleportMode (separado) controla apenas o movimento DENTRO do campo
 local function tweenToFieldImpl(destination)
 	if not shouldContinue() then return false end
 
+	-- NOVO: Teleporte direto até o campo/colmeia se TeleportToField estiver ligado
+	if CONFIG.TeleportToField then
+		return teleportTo(destination)
+	end
+
+	-- ORIGINAL: Usa TeleportMode apenas dentro do campo (mantido para compatibilidade)
 	if CONFIG.TeleportMode then
 		return teleportTo(destination)
 	end
@@ -668,6 +749,15 @@ end
 local function tweenToField(destination, owner)
 	return requestMovement(owner or "field", function()
 		return tweenToFieldImpl(destination)
+	end)
+end
+
+-- Chegada ao campo sempre é instantânea. O modo de movimento configurado na
+-- interface continua sendo aplicado somente depois, dentro do próprio campo.
+local function teleportToSelectedField(destination)
+	return requestMovement("field-travel", function()
+		if not shouldContinue() then return false end
+		return teleportTo(destination)
 	end)
 end
 
@@ -780,6 +870,21 @@ local function getFieldPosition(fieldObj)
 		end
 	end
 	return nil, nil
+end
+
+canHoldCollector = function()
+	if not CONFIG or not CONFIG.Enabled or not CONFIG.SelectedField then return false end
+	local root = getRoot()
+	local fieldPosition, fieldSize = getFieldPosition(CONFIG.SelectedField)
+	if not root or not fieldPosition then return false end
+
+	-- Usa o tamanho real do campo quando disponível e acrescenta uma margem
+	-- pequena para o ponto de chegada do teleporte.
+	local radius = CONFIG.FieldRadius + 12
+	if fieldSize then
+		radius = math.max(radius, math.max(fieldSize.X, fieldSize.Z) * 0.5 + 6)
+	end
+	return (root.Position - fieldPosition).Magnitude <= radius
 end
 
 -- Posiciona um sprinkler usando a própria Tool do inventário. Tool:Activate()
@@ -2408,7 +2513,7 @@ local function automationLoop()
 	while shouldContinue() do
 		if not CONFIG.SelectedField or not CONFIG.SelectedField.Parent then 
 			task.wait(0.5)
-		elseif safeGetPollenPercent() >= CONFIG.ConvertAt then
+		elseif CONFIG.AutoConvert and safeGetPollenPercent() >= CONFIG.ConvertAt then
 			-- Atualiza pólen coletado antes de converter
 			local currentPollen = safeGetStatValue(pollenValue)
 			if currentPollen > RUNTIME.Stats.LastPollenValue then
@@ -2424,6 +2529,16 @@ local function automationLoop()
 				RUNTIME.Stats.HoneyMade = RUNTIME.Stats.HoneyMade + (currentHoney - RUNTIME.Stats.LastHoneyValue)
 			end
 			RUNTIME.Stats.LastHoneyValue = currentHoney
+		elseif not CONFIG.AutoConvert and safeGetPollenPercent() >= CONFIG.ConvertAt then
+			-- Avisa que a bag está cheia mas não vai converter (Auto Convert desligado)
+			-- Avisa apenas uma vez a cada 60 segundos para não spammar
+			local lastWarning = RUNTIME.Stats.LastConvertWarning or 0
+			if tick() - lastWarning >= 60 then
+				safeNotify("⚠️ Bag Full!", "Auto Convert is OFF - Convert manually!", 5)
+				RUNTIME.Stats.LastConvertWarning = tick()
+			end
+			-- Continua farmando
+			farmField()
 		else
 			-- Atualiza pólen durante farm
 			local currentPollen = safeGetStatValue(pollenValue)
@@ -2460,7 +2575,7 @@ local function automationLoop()
 				-- MCP: ajusta Y pelo chão real antes de teleportar (como o MacroSystem faz)
 				local adjustedPos = getAdjustedFieldPosition(CONFIG.SelectedField) or (fPos + Vector3.new(0, 3, 0))
 				invalidatePathCache()
-				tweenToField(adjustedPos)
+				teleportToSelectedField(adjustedPos)
 				
 				if shouldContinue() then
 					-- Depois ANDA normalmente no campo
@@ -2649,17 +2764,29 @@ local FarmToggle = FarmTab:CreateToggle({
 
 FarmTab:CreateSection("⚙️ Settings")
 
-
+FarmTab:CreateToggle({
+	Name = "🚀 Teleport To Field",
+	CurrentValue = false,
+	Flag = "TeleportToField",
+	Callback = function(Value)
+		CONFIG.TeleportToField = Value
+		safeNotify(
+			Value and "🚀 Teleport To Field ON" or "🚶 Walk To Field ON",
+			Value and "Teleporta até o campo selecionado" or "Anda até o campo selecionado",
+			3
+		)
+	end,
+})
 
 FarmTab:CreateToggle({
-	Name = "⚡ Teleport Mode",
+	Name = "⚡ Teleport Inside Field",
 	CurrentValue = false,
 	Flag = "TeleportMode",
 	Callback = function(Value)
 		CONFIG.TeleportMode = Value
 		safeNotify(
-			Value and "⚡ Teleport Mode ON" or "🚶 Walk Mode ON",
-			Value and "Teleportando para flores e tokens" or "Andando normalmente no campo",
+			Value and "⚡ Field Teleport ON" or "🚶 Field Walk ON",
+			Value and "Teleporta entre alvos dentro do campo" or "Anda entre alvos dentro do campo",
 			2
 		)
 	end,
@@ -2724,6 +2851,21 @@ local SpeedSlider = FarmTab:CreateSlider({
 	Callback = function(Value)
 		CONFIG.MoveSpeed = Value
 		BOOST_MANAGER.BaseMoveSpeed = Value
+	end,
+})
+
+-- Auto Convert Toggle
+local AutoConvertToggle = FarmTab:CreateToggle({
+	Name = "Auto Convert",
+	CurrentValue = true,
+	Flag = "AutoConvertToggle",
+	Callback = function(Value)
+		CONFIG.AutoConvert = Value
+		if Value then
+			safeNotify("Auto Convert Enabled", "Will convert at " .. CONFIG.ConvertAt .. "%", 3)
+		else
+			safeNotify("Auto Convert Disabled", "You'll need to convert manually", 3)
+		end
 	end,
 })
 
