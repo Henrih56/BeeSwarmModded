@@ -595,6 +595,12 @@ CONFIG = {
 	FarmBalloons = false, -- Desativado por padrão (pode ser ligado na UI)
 	BalloonCheckInterval = 1,
 	
+	-- Sprout Farm (NOVO)
+	FarmSprouts = false,
+	
+	-- Planter System (NOVO)
+	AutoCollectPlanters = false,
+	
 	-- Cloud Farm
 	FarmClouds = false,
 	CloudCheckInterval = 3,
@@ -2051,6 +2057,233 @@ end
 -- ═══════════════════════════════════════════════════════════════
 --                     CLOUD FARM
 -- ═══════════════════════════════════════════════════════════════
+--                     SPROUT FARM (NOVO - ALTA PRIORIDADE)
+-- ═══════════════════════════════════════════════════════════════
+
+local SPROUT_FARM = {
+	Enabled = false,
+	Running = false,
+	CheckInterval = 2,
+	LastCheck = 0,
+	FarmRadius = 20,
+	MinFarmTime = 30,
+	MaxFarmTime = 180,
+}
+
+local function findActiveSprouts()
+	local sprouts = {}
+	local sproutsFolder = workspace:FindFirstChild("Sprouts")
+	if not sproutsFolder then return sprouts end
+	
+	local root = getRoot()
+	if not root then return sprouts end
+	
+	for _, sprout in ipairs(sproutsFolder:GetChildren()) do
+		if sprout:IsA("Model") and sprout:FindFirstChild("Humanoid") then
+			local sproutPart = sprout:FindFirstChild("HumanoidRootPart") or sprout:FindFirstChild("Torso")
+			if sproutPart then
+				local dist = (root.Position - sproutPart.Position).Magnitude
+				table.insert(sprouts, {
+					Model = sprout,
+					Part = sproutPart,
+					Position = sproutPart.Position,
+					Distance = dist,
+				})
+			end
+		end
+	end
+	
+	table.sort(sprouts, function(a, b) return a.Distance < b.Distance end)
+	return sprouts
+end
+
+local function farmSprout(sproutData)
+	if not sproutData or not sproutData.Model.Parent then return false end
+	if not SPROUT_FARM.Enabled or not CONFIG.FarmSprouts then return false end
+	
+	print("[BSS AutoFarm] 🌱 Sprout detectado! Indo farmar...")
+	
+	local farmPos = sproutData.Position + Vector3.new(0, 5, 0)
+	if not tweenToField(farmPos, "sprout") then
+		return false
+	end
+	
+	safeNotify("🌱 Sprout Found!", "Farming sprout for pollen and buffs!", 4)
+	RUNTIME.Stats.SproutsFarmed = RUNTIME.Stats.SproutsFarmed or 0
+	RUNTIME.Stats.SproutsFarmed = RUNTIME.Stats.SproutsFarmed + 1
+	
+	local farmStartTime = tick()
+	
+	while shouldContinue() and SPROUT_FARM.Enabled and CONFIG.FarmSprouts
+		and sproutData.Model.Parent
+		and tick() - farmStartTime < SPROUT_FARM.MaxFarmTime do
+		
+		if not sproutData.Part.Parent then break end
+		
+		local currentPos = sproutData.Part.Position
+		moveTo(currentPos + Vector3.new(0, 5, 0), 8, "sprout")
+		
+		checkAndCollectTokens()
+		
+		task.wait(1)
+		
+		if tick() - farmStartTime < SPROUT_FARM.MinFarmTime then continue end
+		if safeGetPollenPercent() >= CONFIG.ConvertAt and CONFIG.AutoConvert then break end
+	end
+	
+	print("[BSS AutoFarm] ✅ Sprout farm finalizado!")
+	return true
+end
+
+local function startSproutFarm()
+	if SPROUT_FARM.Running then return end
+	SPROUT_FARM.Running = true
+	
+	task.spawn(function()
+		while SPROUT_FARM.Enabled and CONFIG.FarmSprouts and shouldContinue() do
+			local currentTime = tick()
+			
+			if currentTime - SPROUT_FARM.LastCheck >= SPROUT_FARM.CheckInterval then
+				local sprouts = findActiveSprouts()
+				
+				if #sprouts > 0 and CONFIG.Enabled then
+					CONFIG.Enabled = false
+					task.wait(0.5)
+					
+					farmSprout(sprouts[1])
+					
+					task.wait(2)
+					CONFIG.Enabled = true
+				end
+				
+				SPROUT_FARM.LastCheck = currentTime
+			end
+			
+			task.wait(1)
+		end
+		SPROUT_FARM.Running = false
+	end)
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--                     PLANTER SYSTEM (NOVO - COLETA AUTOMÁTICA)
+-- ═══════════════════════════════════════════════════════════════
+
+local PLANTER_SYSTEM = {
+	Enabled = false,
+	Running = false,
+	CheckInterval = 30,
+	LastCheck = 0,
+	CollectedCount = 0,
+}
+
+local function checkAndCollectPlanters()
+	if not PLANTER_SYSTEM.Enabled then return end
+	
+	local plantersFolder = workspace:FindFirstChild("Planters")
+	if not plantersFolder then return end
+	
+	local root = getRoot()
+	if not root then return end
+	
+	for _, planter in ipairs(plantersFolder:GetChildren()) do
+		if planter:IsA("Model") then
+			local ownerValue = planter:FindFirstChild("Owner")
+			if ownerValue and ownerValue.Value == player then
+				local growing = planter:GetAttribute("Growing")
+				local growthPercent = planter:GetAttribute("GrowthPercent") or 0
+				
+				if (growing == false or growthPercent >= 100) then
+					local planterPart = planter:FindFirstChild("Main") or planter:FindFirstChild("Base") or planter.PrimaryPart
+					if planterPart then
+						local dist = (root.Position - planterPart.Position).Magnitude
+						if dist < 100 then
+							print(string.format("[BSS AutoFarm] 🌱 Coletando planter pronto! (%s)", planter.Name))
+							
+							local oldEnabled = CONFIG.Enabled
+							CONFIG.Enabled = false
+							
+							local planterPos = planterPart.Position + Vector3.new(0, 5, 0)
+							if tweenToField(planterPos, "planter") then
+								local evts = getBSSEvents()
+								if evts then
+									pcall(function()
+										evts.ClientCall("CollectPlanter", planter)
+									end)
+								end
+								
+								task.wait(2)
+								PLANTER_SYSTEM.CollectedCount = PLANTER_SYSTEM.CollectedCount + 1
+								safeNotify("🌱 Planter Collected!", planter.Name, 3)
+							end
+							
+							task.wait(1)
+							CONFIG.Enabled = oldEnabled
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+local function startPlanterSystem()
+	if PLANTER_SYSTEM.Running then return end
+	PLANTER_SYSTEM.Running = true
+	
+	task.spawn(function()
+		while PLANTER_SYSTEM.Enabled and shouldContinue() do
+			local currentTime = tick()
+			
+			if currentTime - PLANTER_SYSTEM.LastCheck >= PLANTER_SYSTEM.CheckInterval then
+				checkAndCollectPlanters()
+				PLANTER_SYSTEM.LastCheck = currentTime
+			end
+			
+			task.wait(5)
+		end
+		PLANTER_SYSTEM.Running = false
+	end)
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--                     GOO COLLECTOR (NOVO - BUFF IMPORTANTE)
+-- ═══════════════════════════════════════════════════════════════
+
+local GOO_COLLECTOR = {
+	Enabled = true,
+	LastCollect = 0,
+	CollectInterval = 1.5,
+}
+
+local function collectNearbyGoo()
+	if not GOO_COLLECTOR.Enabled then return end
+	if tick() - GOO_COLLECTOR.LastCollect < GOO_COLLECTOR.CollectInterval then return end
+	
+	local gooFolder = workspace:FindFirstChild("Goo")
+	if not gooFolder then return end
+	
+	local root = getRoot()
+	if not root then return end
+	
+	for _, goo in ipairs(gooFolder:GetChildren()) do
+		if goo:IsA("BasePart") or (goo:IsA("Model") and goo.PrimaryPart) then
+			local gooPos = goo:IsA("BasePart") and goo.Position or goo.PrimaryPart.Position
+			local dist = (root.Position - gooPos).Magnitude
+			
+			if dist < 15 then
+				moveTo(gooPos, 3, "goo")
+				task.wait(0.2)
+			end
+		end
+	end
+	
+	GOO_COLLECTOR.LastCollect = tick()
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--                     CLOUD FARM
+-- ═══════════════════════════════════════════════════════════════
 
 local CLOUD_FARM = {
 	Enabled = false,
@@ -2193,6 +2426,10 @@ local function resetAllSystems()
 	BALLOON_FARM.Running = false
 	BALLOON_FARM.IsFarming = false
 	BALLOON_FARM.Enabled = false
+	SPROUT_FARM.Running = false
+	SPROUT_FARM.Enabled = false
+	PLANTER_SYSTEM.Running = false
+	PLANTER_SYSTEM.Enabled = false
 	CLOUD_FARM.Running = false
 	CLOUD_FARM.Enabled = false
 	collectingToken = false
@@ -2484,6 +2721,9 @@ local function collectAtField(fieldObj)
 			lastMarkCheck = currentTime
 		end
 		
+		-- Coleta goo (NOVO - sempre ativo durante o farm)
+		collectNearbyGoo()
+		
 		-- Re-escaneia flores somente no modo que as usa como alvo.
 		if not usesSweepRoute and currentTime - lastFlowerScan > 20 then
 			currentFlowers = findFlowersInField(fieldObj)
@@ -2601,6 +2841,18 @@ local function automationLoop()
 	if CONFIG.FarmBalloons then
 		BALLOON_FARM.Enabled = true
 		startBalloonFarm()
+	end
+	
+	-- Sprout farm (NOVO - se habilitado)
+	if CONFIG.FarmSprouts then
+		SPROUT_FARM.Enabled = true
+		startSproutFarm()
+	end
+	
+	-- Planter system (NOVO - se habilitado)
+	if CONFIG.AutoCollectPlanters then
+		PLANTER_SYSTEM.Enabled = true
+		startPlanterSystem()
 	end
 	
 	if CONFIG.FarmClouds then
@@ -3264,6 +3516,68 @@ local CloudIntervalSlider = SpecialTab:CreateSlider({
 })
 
 -- ═══════════════════════════════════════════════════════════════
+--                    NOVO: SPROUT & PLANTER SYSTEMS
+-- ═══════════════════════════════════════════════════════════════
+
+SpecialTab:CreateSection("🌱 Sprout System (NEW!)")
+
+SpecialTab:CreateToggle({
+	Name = "🌱 Auto Farm Sprouts",
+	CurrentValue = false,
+	Flag = "SproutToggle",
+	Callback = function(Value)
+		CONFIG.FarmSprouts = Value
+		SPROUT_FARM.Enabled = Value
+		
+		if Value and CONFIG.Enabled then
+			SPROUT_FARM.Running = false
+			startSproutFarm()
+		end
+		
+		safeNotify(
+			Value and "🌱 Sprout Farm ON" or "🌱 Sprout Farm OFF",
+			Value and "Will automatically farm sprouts when they appear!" or "Sprout farm disabled",
+			3
+		)
+	end,
+})
+
+SpecialTab:CreateSection("🪴 Planter System (NEW!)")
+
+SpecialTab:CreateToggle({
+	Name = "🪴 Auto Collect Planters",
+	CurrentValue = false,
+	Flag = "PlanterToggle",
+	Callback = function(Value)
+		CONFIG.AutoCollectPlanters = Value
+		PLANTER_SYSTEM.Enabled = Value
+		
+		if Value and CONFIG.Enabled then
+			PLANTER_SYSTEM.Running = false
+			startPlanterSystem()
+		end
+		
+		safeNotify(
+			Value and "🪴 Auto Planter ON" or "🪴 Auto Planter OFF",
+			Value and "Will automatically collect ready planters!" or "Planter collection disabled",
+			3
+		)
+	end,
+})
+
+SpecialTab:CreateSlider({
+	Name = "Planter Check Interval",
+	Range = {10, 120},
+	Increment = 10,
+	Suffix = " seconds",
+	CurrentValue = 30,
+	Flag = "PlanterIntervalSlider",
+	Callback = function(Value)
+		PLANTER_SYSTEM.CheckInterval = Value
+	end,
+})
+
+-- ═══════════════════════════════════════════════════════════════
 --                         TAB: ADVANCED
 -- ═══════════════════════════════════════════════════════════════
 
@@ -3744,6 +4058,8 @@ InfoTab:CreateButton({
 		TOKEN_COLLECTOR.Enabled = false
 		COCONUT_CATCHER.Enabled = false
 		BALLOON_FARM.Enabled = false
+		SPROUT_FARM.Enabled = false
+		PLANTER_SYSTEM.Enabled = false
 		CLOUD_FARM.Enabled = false
 		HOTBAR_SYSTEM.Enabled = false
 		AUTO_QUEST.Enabled = false
